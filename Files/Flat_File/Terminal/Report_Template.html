@@ -1,0 +1,621 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Validation Report - {{ tc_id }}</title>
+    <style>
+        :root {
+            /* NEW DEEP CORPORATE BLUE (from attached image) */
+            --color-primary: #004A92; 
+            
+            /* Other colors retained from visual improvement for contrast */
+            --color-secondary: #495057; 
+            --color-pass: #28a745; 
+            --color-fail: #dc3545; 
+            --color-warn: #ffc107; 
+            --color-neutral: #6c757d; 
+            --bg-body: #f8f9fa;
+            --bg-card: #ffffff;
+            --light-pass: #e6f7ea;
+            --light-fail: #fde8e8;
+            --light-warn: #fffbe6;
+            --light-neutral: #eff2f7;
+            --font-main: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            --font-mono: Consolas, Monaco, monospace;
+        }
+        body { font-family: var(--font-main); margin: 0; background-color: var(--bg-body); color: #212529; line-height: 1.6; }
+        .container { max-width: 1200px; margin: auto; padding: 40px; }
+        
+        h1 { 
+            color: var(--color-primary); 
+            padding-bottom: 0; 
+            margin-top: 0; 
+            margin-bottom: 5px;
+            font-weight: 700;
+        }
+        
+        .h1-separator {
+            height: 3px;
+            background-color: var(--color-primary);
+            border-radius: 1px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); 
+            margin-bottom: 25px;
+            width: 100%;
+            opacity: 0.8;
+        }
+        
+        .description-box {
+            background-color: var(--color-primary); 
+            color: white; 
+            padding: 20px 25px;
+            border-radius: 8px; 
+            margin-bottom: 30px;
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.15);
+        }
+        .description-box p {
+            margin: 0;
+            font-size: 1.2em;
+            font-weight: 400;
+        }
+        
+        h2 { color: var(--color-secondary); border-bottom: 1px solid #dee2e6; padding-bottom: 8px; margin-top: 40px; font-weight: 600; }
+        .card-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 25px; margin-bottom: 30px; }
+        @media (max-width: 1200px) {
+             .card-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+        }
+
+        .card { 
+            background: var(--bg-card); 
+            padding: 20px; 
+            border-radius: 12px; /* UPDATED: Adopt user's radius */
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1); /* UPDATED: Adopt user's shadow */
+            transition: all 0.3s ease-in-out; /* UPDATED: Adopt user's transition */
+            border-left: 5px solid transparent; 
+            cursor: pointer;
+        }
+        .card:hover {
+            /* UPDATED: Adopt user's more aggressive hover styles */
+            box-shadow: 0 12px 24px rgba(0,0,0,0.25); 
+            transform: translateY(-6px);
+        }
+
+        /* Specific card borders */
+        .card:nth-child(1) { border-left-color: var(--color-primary); }
+        .card:nth-child(2) { border-left-color: var(--color-secondary); }
+        .card:nth-child(3) { border-left-color: var(--color-fail); }
+        .card:nth-child(4) { border-left-color: var(--color-fail); }
+
+        .card h3 { margin-top: 0; font-size: 1.1em; color: var(--color-secondary); font-weight: 500; }
+        
+        .status-tag {
+            padding: 6px 12px;
+            border-radius: 50px;
+            font-weight: bold;
+            font-size: 0.9em;
+            color: white; 
+            letter-spacing: 0.5px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); 
+        }
+        .status-tag.status-pass { background-color: var(--color-pass); }
+        .status-tag.status-fail { background-color: var(--color-fail); }
+        .status-tag.status-warn { background-color: var(--color-warn); color: #333; }
+        .status-tag.status-neutral { background-color: var(--color-neutral); }
+        
+        .summary-table { width: 100%; }
+        .summary-table td:first-child { font-weight: 600; width: 40%; color: var(--color-secondary); }
+        .summary-table td { padding: 10px 0; border-bottom: 1px dashed #eee; }
+        .chart-container { background: var(--bg-card); padding: 25px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
+        .chart-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 25px; margin-bottom: 40px; }
+        @media (max-width: 900px) {
+            .chart-grid { grid-template-columns: 1fr; }
+        }
+
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-top: 15px; 
+            background: #fff; 
+            border-radius: 5px; 
+            overflow: hidden; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05); 
+        }
+        th, td { border: 1px solid #e9ecef; padding: 12px 15px; text-align: left; font-size: 14px; }
+        th { 
+            background-color: var(--color-primary); 
+            color: white; 
+            font-weight: 600; 
+            text-transform: uppercase; 
+            letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        /* Zebra striping for detailed tables */
+        .status-section-content table tr:nth-child(even) {
+            background-color: #f8f9fa; 
+        }
+        /* Subtle hover effect for table rows */
+        .status-section-content table tr:hover {
+            background-color: #e9f0f9;
+        }
+
+        /* Monospace font for technical tables */
+        .status-section-content table {
+            font-family: var(--font-mono);
+        }
+
+        /* Styling for Code/Pre Blocks */
+        .status-section-content pre {
+            background-color: #f4f6f9;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 0.9em;
+            color: #333;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .status-section { margin-top: 25px; border-radius: 8px; overflow: hidden; border: 1px solid #ddd; }
+        .status-section-header { 
+            padding: 15px; 
+            cursor: pointer; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            background-color: var(--light-neutral); 
+            transition: background-color 0.2s;
+            font-weight: 600; 
+        }
+        .status-section-header:hover { 
+            background-color: #d0e0f0; 
+            color: #1a1a1a;
+        }
+        .status-section-content { display: none; padding: 20px; border-top: 1px solid #ddd; overflow-x: auto; background-color: var(--bg-card); } 
+        .status-section-header h3 { margin: 0; font-size: 1.1em; color: #333; display: flex; align-items: center; }
+
+        /* Chevron icon for collapse/expand */
+        .toggle-icon {
+            margin-right: 15px;
+            transition: transform 0.3s ease;
+            font-size: 1.2em; 
+            line-height: 1;
+            display: inline-block;
+            font-family: Arial, sans-serif; 
+        }
+        /* Icon rotation for expanded state (handled by JS) */
+        .status-section-header[aria-expanded="true"] .toggle-icon {
+            transform: rotate(90deg);
+        }
+
+        /* Styling based on data-status */
+        .status-section-header[data-status="fail"] { background-color: var(--light-fail); }
+        .status-section-header[data-status="fail"]:hover { background-color: #fde0e0; }
+        .status-section-header[data-status="pass"] { background-color: var(--light-pass); }
+        .status-section-header[data-status="pass"]:hover { background-color: #d8f5d8; }
+        .status-section-header[data-status="warn"] { background-color: var(--light-warn); }
+        .status-section-header[data-status="warn"]:hover { background-color: #fff8cc; }
+        .status-section-header[data-status="neutral"] { background-color: var(--light-neutral); }
+        .status-section-header[data-status="neutral"]:hover { background-color: #e0e0e0; }
+
+        .execution-summary-card {
+            background: var(--bg-card); 
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); 
+            overflow: hidden; 
+            margin-bottom: 30px;
+        }
+
+        .wave-header {
+            padding: 20px;
+            font-size: 1.5em;
+            font-weight: 600;
+            color: white; 
+            background: linear-gradient(135deg, #00376B, var(--color-primary)); 
+            position: relative;
+            z-index: 1;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .wave-header::after { display: none; }
+        
+        .summary-card-content {
+             padding: 20px 25px;
+        }
+        .summary-table-modern {
+            border: none;
+            box-shadow: none;
+            margin-top: 0;
+        }
+        .summary-table-modern td {
+            border: none;
+            padding: 12px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .summary-table-modern tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .toggle-controls {
+            margin-bottom: 15px;
+            text-align: right;
+            font-size: 0.9em;
+        }
+        .toggle-controls button {
+            background: none;
+            border: none;
+            color: var(--color-primary);
+            cursor: pointer;
+            text-decoration: none;
+            padding: 0 5px;
+            margin-left: 10px;
+            font-weight: 600;
+            border-radius: 4px;
+            padding: 5px 10px;
+            border: 1px solid var(--color-primary);
+            transition: background-color 0.2s, color 0.2s;
+        }
+        .toggle-controls button:hover {
+            color: white;
+            background-color: var(--color-primary);
+        }
+
+        .toggle-controls .print-btn {
+            background-color: #f1f1f1;
+            border: 1px solid #ccc;
+            color: #444;
+        }
+        .toggle-controls .print-btn:hover {
+            background-color: #e0e0e0;
+            color: #222;
+        }
+        
+        /* Footer Style */
+        .footer {
+            text-align: center;
+            padding: 30px 0 10px 0;
+            margin-top: 50px;
+            border-top: 1px solid #ddd;
+            font-size: 0.9em;
+            color: var(--color-neutral);
+        }
+
+        @media print {
+            .container { padding: 20px; }
+            .card-grid, .chart-grid, .toggle-controls { display: none; }
+            /* Force all sections to display when printing */
+            .status-section-content { display: block !important; } 
+            .status-section-header {
+                background-color: #eee !important;
+                -webkit-print-color-adjust: exact;
+                color-adjust: exact;
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <script>
+        // --- Core Accordion Logic ---
+        function toggleSection(header) {
+            const content = header.nextElementSibling;
+            const isExpanded = content.style.display === "block";
+
+            if (!isExpanded) {
+                content.style.display = "block";
+                header.setAttribute('aria-expanded', 'true');
+            } else {
+                content.style.display = "none";
+                header.setAttribute('aria-expanded', 'false');
+            }
+            
+            // Update the Toggle All button state
+            updateToggleAllButton();
+        }
+
+        function expandAllSections() {
+            document.querySelectorAll('.status-section-content').forEach(content => {
+                content.style.display = 'block';
+                content.previousElementSibling.setAttribute('aria-expanded', 'true');
+            });
+             const toggleBtn = document.getElementById('toggleAllBtn');
+             if (toggleBtn) toggleBtn.textContent = 'Collapse All';
+        }
+
+        function collapseAllSections() {
+            document.querySelectorAll('.status-section-content').forEach(content => {
+                content.style.display = 'none';
+                content.previousElementSibling.setAttribute('aria-expanded', 'false');
+            });
+             const toggleBtn = document.getElementById('toggleAllBtn');
+             if (toggleBtn) toggleBtn.textContent = 'Expand All';
+        }
+        
+        // --- Toggle All Function (FIXED) ---
+        function toggleAllSections() {
+            const btn = document.getElementById('toggleAllBtn');
+            if (!btn) return;
+            
+            // Check if the current state is not "Collapse All"
+            if (btn.textContent.includes('Expand All') || btn.textContent.includes('Toggle All')) {
+                expandAllSections();
+            } else {
+                collapseAllSections();
+            }
+        }
+        
+        // --- Utility function to manage button text on single click events ---
+        function updateToggleAllButton() {
+             const toggleBtn = document.getElementById('toggleAllBtn');
+             if (!toggleBtn) return;
+             
+             const sections = document.querySelectorAll('.status-section-content');
+             const allCollapsed = Array.from(sections).every(sec => sec.style.display === 'none' || sec.style.display === '');
+             const allExpanded = Array.from(sections).every(sec => sec.style.display === 'block');
+
+             if (allExpanded) {
+                 toggleBtn.textContent = 'Collapse All';
+             } else if (allCollapsed) {
+                 toggleBtn.textContent = 'Expand All';
+             } else {
+                 toggleBtn.textContent = 'Toggle All'; // Mixed state
+             }
+        }
+        
+        // --- Print Utility ---
+        function printReport() {
+            // Expands all sections before printing
+            expandAllSections(); 
+            window.print();
+        }
+
+        function injectTableAccessibility() {
+            document.querySelectorAll('.status-section-content table').forEach(table => {
+                table.querySelectorAll('thead tr th').forEach(th => {
+                    th.setAttribute('scope', 'col');
+                });
+            });
+        }
+
+        function renderCharts(chartData) {
+            
+            const brightColors = [
+                '#00BCD4', '#66B2FF', '#FFC107', '#4DB6AC', '#B39DDB', '#FFB74D',
+                '#E57373', '#81C784', '#64B5F6', '#BA68C8', '#FFF176', '#A1887F'
+            ];
+            
+            const pieCtx = document.getElementById('recordStatusPieChart');
+            if (pieCtx) {
+                
+                const newPieLabels = ['Passed', 'Error', 'Excluded']; 
+                const newPieColors = ['#28a745', '#dc3545', '#6c757d']; 
+                
+                let labels = chartData.pie_labels && chartData.pie_labels.length === 3 ? newPieLabels : chartData.pie_labels;
+                let colors = chartData.pie_labels && chartData.pie_labels.length === 3 ? newPieColors : chartData.pie_colors;
+                
+                new Chart(pieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: chartData.pie_data,
+                            backgroundColor: colors,
+                            hoverOffset: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { position: 'bottom' },
+                            title: { 
+                                display: true, 
+                                text: 'Overall Record Status Breakdown',
+                                font: { size: 16, weight: '600' }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        let label = context.label || '';
+                                        if (label) {
+                                            label += ': ';
+                                        }
+                                        if (context.parsed !== null) {
+                                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                            const percentage = (context.parsed / total * 100).toFixed(2) + '%';
+                                            label += context.parsed.toLocaleString() + ' (' + percentage + ')';
+                                        }
+                                        return label;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            const barCtx = document.getElementById('errorTypeBarChart');
+            if (barCtx) {
+                const barBackgroundColors = chartData.bar_labels.map((_, index) => brightColors[index % brightColors.length]);
+                
+                new Chart(barCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: chartData.bar_labels,
+                        datasets: [{
+                            label: 'Total Errors',
+                            data: chartData.bar_data,
+                            backgroundColor: barBackgroundColors, 
+                            borderColor: barBackgroundColors, 
+                            borderWidth: 0,
+                            borderRadius: 4
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y', 
+                        responsive: true,
+                        plugins: {
+                            legend: { display: false },
+                            title: { 
+                                display: true, 
+                                text: 'Error Count by Validation Type',
+                                font: { size: 16, weight: '600' }
+                            }
+                        },
+                        scales: {
+                            x: { beginAtZero: true, title: { display: true, text: 'Number of Errors' } },
+                            y: { title: { display: false } }
+                        }
+                    }
+                });
+            }
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Validation Report: {{ description }}</h1>
+        <div class="h1-separator"></div>
+
+        <div class="description-box">
+            <p>{{ description }}</p>
+        </div>
+
+        <div class="card-grid">
+            <div class="card">
+                <h3>Overall Status</h3>
+                <span class="status-tag status-{{ overall_status | lower | replace('n/a', 'neutral') }}">{{ overall_status }}</span>
+            </div>
+            <div class="card">
+                <h3>Total Records</h3>
+                <p style="font-size: 1.8em; font-weight: 700; color: var(--color-secondary);">{{ total_records }}</p>
+            </div>
+            <div class="card">
+                <h3>Records with Errors</h3>
+                <p style="font-size: 1.8em; font-weight: 700; color: var(--color-fail);">{{ records_with_errors }}</p>
+            </div>
+            <div class="card">
+                <h3>Error Rate</h3>
+                {% set error_rate_style = 'var(--color-pass)' if error_rate == '0.00%' or error_rate == '0%' else 'var(--color-neutral)' if error_rate == 'N/A' else 'var(--color-fail)' %}
+                <p style="font-size: 1.8em; font-weight: 700; color: {{ error_rate_style }};">{{ error_rate }}</p>
+            </div>
+        </div>
+
+        <h2>Visual Summary</h2>
+        <div class="chart-grid">
+            <div class="chart-container">
+                <canvas id="recordStatusPieChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <canvas id="errorTypeBarChart"></canvas>
+            </div>
+        </div>
+
+        <div class="execution-summary-card">
+             <div class="wave-header">Execution Summary</div>
+             <div class="summary-card-content">
+                <table class="summary-table summary-table-modern">
+                    <tr>
+                        <td>Environment</td>
+                        <td>{{ environment | default('N/A') }}</td>
+                    </tr>
+                    <tr>
+                        <td>Execution Timestamp</td>
+                        <td>{{ run_timestamp | default('N/A') }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Records (Initial)</td>
+                        <td>{{ total_records_initial }}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Records (Post-SQL Filter)</td>
+                        <td>{{ total_records }}</td>
+                    </tr>
+                    <tr>
+                        <td>Records Passed (Clean)</td>
+                        <td>{{ records_passed }}</td>
+                    </tr>
+                    <tr>
+                        <td>Records with Errors</td>
+                        <td>{{ records_with_errors }}</td>
+                    </tr>
+                    <tr>
+                        <td>Error Rate</td>
+                        <td>{{ error_rate }}</td>
+                    </tr>
+                </table>
+             </div>
+        </div>
+
+
+        <h2>Detailed Validation Results</h2>
+        <div class="toggle-controls">
+            <!-- FUNCTIONAL FIX: Added parentheses for function call -->
+            <button id="toggleAllBtn" onclick="toggleAllSections()">Expand All</button>
+            <button class="print-btn" onclick="printReport()">Print Report</button>
+        </div>
+        
+        {% for name, section in html_sections.items() %}
+            <div class="status-section">
+                <div class="status-section-header" data-status="{{ section.status }}" onclick="toggleSection(this)" aria-expanded="false"> 
+                    <h3><span class="toggle-icon">›</span> {{ name }}</h3> 
+                    <span class="status-tag status-{{ section.status }}">{{ section.status | upper }}</span>
+                </div>
+                <div class="status-section-content">
+                    {{ section.html | safe }}
+                </div>
+            </div>
+        {% endfor %}
+
+    </div>
+
+    <div class="footer">
+        <!--<p>Generated by Data Validation Framework (TC: {{ tc_id }}). All times are UTC unless otherwise specified.</p>-->
+    </div>
+
+    <script>
+        const chartData = {
+            pie_labels: {{ chart_data.pie_labels | tojson | safe }},
+            pie_data: {{ chart_data.pie_data | tojson | safe }},
+            pie_colors: {{ chart_data.pie_colors | tojson | safe }},
+            bar_labels: {{ chart_data.bar_labels | tojson | safe }},
+            bar_data: {{ chart_data.bar_data | tojson | safe }}
+        };
+        
+        document.addEventListener('DOMContentLoaded', () => {
+             renderCharts(chartData);
+             injectTableAccessibility();
+
+             const toggleBtn = document.getElementById('toggleAllBtn');
+             let allCollapsed = true;
+             
+             document.querySelectorAll('.status-section').forEach(section => {
+                 const header = section.querySelector('.status-section-header');
+                 const content = section.querySelector('.status-section-content');
+                 
+                 // Keep failing sections open, collapse others
+                 if (header.getAttribute('data-status') === 'fail') {
+                     content.style.display = 'block'; 
+                     header.setAttribute('aria-expanded', 'true');
+                     allCollapsed = false;
+                 } else {
+                     content.style.display = 'none';
+                     header.setAttribute('aria-expanded', 'false');
+                 }
+             });
+             
+             // Set button state based on the initial view
+             if (toggleBtn) {
+                 if (!allCollapsed) {
+                     toggleBtn.textContent = 'Collapse All'; 
+                 } else {
+                     toggleBtn.textContent = 'Expand All'; 
+                 }
+             }
+        });
+    </script>
+</body>
+</html>
