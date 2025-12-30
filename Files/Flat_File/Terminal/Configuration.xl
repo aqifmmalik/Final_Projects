@@ -1,0 +1,24 @@
+Run
+
+Test Case	Description	Execute	Path	File_Type	Delimiter	Running Env	Comments	Mapping_Pattern	SQL_Filter_File
+
+
+Scenarios
+TC	Test_Case: Example of Bad Records	Field Name	Expected Format	How to Test
+
+
+Settings
+
+Setting	Value
+Auto_Open_Report	Yes
+Generate_Passed_Data_Report	FALSE
+Output_folder	\\QA\Testing_Results\HEDIS\Results\
+Allowed_values_Separator	|
+Show_Sheet_Configuration_Issues	No
+Show_Sheet_Passed_Data	No
+Generate_HTML_Report	Yes
+HTML_Template_path	C:\DBTesting\FlatFile\GUI
+Enable_Cell_Highlighting	yes
+Auto_Run	yes
+Auto_Input_Folder	\\QA\Testing_Results\HEDIS\TestFiles\
+Scheduler_Interval_Minutes	1
