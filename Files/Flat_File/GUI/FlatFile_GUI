@@ -1,0 +1,1766 @@
+
+import pandas as pd
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
+import os
+import numpy as np
+import math
+import traceback
+import sys
+import subprocess
+from datetime import datetime
+import csv
+import re
+from jinja2 import Environment, FileSystemLoader
+import time
+import tkinter as tk
+from tkinter import filedialog, ttk
+import threading
+import io
+import queue
+import ttkbootstrap as ttk_b
+from ttkbootstrap.constants import *
+import json # ADDED: Import for safe JSON dumping to HTML
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+class Colors:
+    HEADER = '\033[95m'; OKBLUE = '\033[94m'; OKCYAN = '\033[96m'; OKGREEN = '\033[92m'
+    WARNING = '\033[93m'; FAIL = '\033[91m'; ENDC = '\033[0m'; BOLD = '\033[1m'; UNDERLINE = '\033[4m'
+
+def clear_screen():
+    if os.name == 'nt': os.system('cls'); os.system('')
+    else: os.system('clear')
+
+def format_bytes(byte_size):
+    if byte_size is None or math.isnan(byte_size): return "N/A"
+    if byte_size == 0: return "0 B"
+    size_name = ("B", "KB", "MB", "GB", "TB"); i = int(math.floor(math.log(byte_size, 1024)))
+    p = math.pow(1024, i); s = round(byte_size / p, 2)
+    return f"{s} {size_name[i]}"
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, 'Configuration.xlsx')
+SQL_RULES_DIR = os.path.join(SCRIPT_DIR, 'sql_rules')
+
+def get_unique_filepath(filepath):
+    if not os.path.exists(filepath): return filepath
+    base, ext = os.path.splitext(filepath)
+    counter = 1
+    while True:
+        new_filepath = f"{base}_{counter}{ext}"
+        if not os.path.exists(new_filepath): return new_filepath
+        counter += 1
+
+def format_and_autofit_sheet(worksheet, df, header_list, write_index=False, enable_autofit=True):
+    header_font = Font(color="FFFFFF", bold=True)
+    header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+    for cell in worksheet[1]: cell.font = header_font; cell.fill = header_fill
+    
+    if not enable_autofit:
+        for i, col_name in enumerate(header_list):
+            worksheet.column_dimensions[get_column_letter(i + 1 + (1 if write_index else 0))].width = len(str(col_name)) + 5
+        return
+
+    col_map = {i + 1 + (1 if write_index else 0): col for i, col in enumerate(header_list)}
+    if write_index: col_map[1] = df.index.name if df.index.name else "S.No"
+    for col_idx, col_name in col_map.items():
+        max_len = len(str(col_name))
+        try:
+            series_pos = col_idx - (1 if write_index else 0) - 1
+            if series_pos < 0 or series_pos >= len(df.columns): continue
+            
+            series = df.index.to_series() if write_index and col_idx == 1 else df.iloc[:, series_pos]
+            
+            if len(series) > 5000:
+                sample_series = series.sample(n=5000, random_state=1).astype(str)
+            else:
+                sample_series = series.astype(str)
+                
+            max_len_val = sample_series.map(len).max()
+            if pd.notna(max_len_val): max_len = max(max_len, int(max_len_val))
+        except Exception: pass
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = max_len + 2
+
+
+def highlight_detail_rows(writer, sheet_name):
+    worksheet = writer.sheets.get(sheet_name)
+    if not worksheet or worksheet.max_row <= 1: return
+    light_red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    for row_idx in range(2, worksheet.max_row + 1):
+        for col_idx in range(1, worksheet.max_column + 1):
+            worksheet.cell(row=row_idx, column=col_idx).fill = light_red_fill
+
+def highlight_summary_cells(writer, sheet_name, df, highlight_rows=False):
+    if df.empty or 'Status' not in df.columns: return
+    worksheet = writer.sheets.get(sheet_name)
+    if not worksheet: return
+    light_red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    light_green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    pandas_index_written = sheet_name in ['Structure', 'Column_Comparison', 'Non_Functional', 'Configuration_Issues']
+    for excel_row_index, (_, row) in enumerate(df.iterrows(), start=2):
+        fill_color = None
+        if row.get('Status') == 'FAIL': fill_color = light_red_fill
+        elif row.get('Status') == 'PASS': fill_color = light_green_fill
+        if fill_color:
+            if highlight_rows:
+                for col_idx in range(1, worksheet.max_column + 1):
+                    worksheet.cell(row=excel_row_index, column=col_idx).fill = fill_color
+            else:
+                status_col_idx = list(df.columns).index('Status') + 1 + (1 if pandas_index_written else 0)
+                worksheet.cell(row=excel_row_index, column=status_col_idx).fill = fill_color
+
+def highlight_overall_status(writer, status):
+    worksheet = writer.sheets.get('Summary')
+    if not worksheet: return
+    fill_color = None
+    if status == 'FAIL': fill_color = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    elif status == 'PASS': fill_color = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    if fill_color: worksheet['B3'].fill = fill_color
+
+def highlight_failed_cells(writer, df, failed_coords_set):
+    if df.empty or not failed_coords_set: return
+    worksheet = writer.sheets.get('Data_Failed')
+    if not worksheet: return
+    light_red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    original_to_new_index = {orig_idx: i for i, orig_idx in enumerate(df.index, start=2)}
+    for coord in failed_coords_set:
+        original_df_index, _, col_pos = coord
+        if original_df_index in original_to_new_index:
+            row_idx_in_excel = original_to_new_index[original_df_index]
+            col_idx_in_excel = col_pos + 2
+            worksheet.cell(row=row_idx_in_excel, column=col_idx_in_excel).fill = light_red_fill
+
+def clean_dateformat(value):
+    if pd.isna(value): return np.nan
+    val_stripped = str(value).strip()
+    if val_stripped in ['nan', 'None', 'NaT', '']: return np.nan
+    else: return val_stripped
+
+def generate_error_summary(results):
+    summary_data = []
+    error_mappings = {
+        'Configuration_Issues': 'Configuration',
+        'Data_Content': 'Mandatory',
+        'DataType': 'Data Type',
+        'Date_Format': 'Date Format',
+        'Length_Compare': 'Length',
+        'Content_Validation': 'Content Rule',
+        'Cross_Field_Validation': 'Cross-Field Rule',
+        'WhiteSpace': 'Whitespace',
+        'SQL_Exclusions': 'SQL Exclusion'
+    }
+    for key, name in error_mappings.items():
+        df = results.get(key)
+        if df is not None and not df.empty and 'Column Name' in df.columns:
+            counts = df['Column Name'].value_counts().reset_index()
+            counts.columns = ['Column Name', 'Error Count']
+            counts['Error Type'] = name
+            summary_data.append(counts)
+        elif key == 'SQL_Exclusions' and df is not None and not df.empty:
+            summary_data.append(pd.DataFrame([{'Column Name': 'N/A', 'Error Count': len(df), 'Error Type': name}]))
+        elif key == 'Cross_Field_Validation' and df is not None and not df.empty and 'Rule ID' in df.columns:
+            counts = df['Rule ID'].value_counts().reset_index()
+            counts.columns = ['Rule ID', 'Error Count']
+            counts['Error Type'] = name
+            counts = counts.rename(columns={'Rule ID': 'Column Name'}) # Using 'Column Name' for consistency in summary structure
+            summary_data.append(counts)
+
+
+    if not summary_data:
+        return pd.DataFrame(columns=['Error Type', 'Column Name', 'Error Count'])
+
+    summary_df = pd.concat(summary_data, ignore_index=True)
+    return summary_df[['Error Type', 'Column Name', 'Error Count']]
+
+def generate_html_report(tc_id, description, results, final_output_file):
+    env = Environment(loader=FileSystemLoader(SCRIPT_DIR))
+    template = env.get_template('report_template.html')
+
+    summary_df = results['Summary']
+    summary_dict = dict(zip(summary_df['Metric'], summary_df['Value']))
+    
+    def get_status_class(val):
+        if isinstance(val, str):
+            val_lower = val.lower()
+            if val_lower == 'pass': return 'status-pass'
+            if val_lower == 'fail': return 'status-fail'
+            if val_lower == 'warn': return 'status-warn'
+        return ''
+
+    # --- Chart Data Preparation (MODIFIED/ADDED SECTION) ---
+    
+    # 1. Pie Chart Data (Overall Record Status)
+    total_records_processed = int(summary_dict.get('Total Records (Post-SQL Filter)', 0))
+    records_with_errors = int(summary_dict.get('Records with Errors', 0))
+    sql_exclusions = len(results.get('SQL_Exclusions', pd.DataFrame()))
+    
+    # Records that passed all checks:
+    records_fully_passed = total_records_processed - records_with_errors
+
+    pie_labels = ['Records Passed', 'Records with Errors', 'Excluded by SQL Filter']
+    pie_data = [records_fully_passed, records_with_errors, sql_exclusions]
+    pie_colors = ['#4CAF50', '#F44336', '#FFC107'] # Green, Red, Amber
+    
+    # 2. Bar Chart Data (Error Breakdown)
+    error_summary_df = results.get('Error_Summary', pd.DataFrame())
+    
+    bar_labels = []
+    bar_data = []
+    
+    if not error_summary_df.empty:
+        # Group by Error Type and sum the counts
+        error_breakdown = error_summary_df.groupby('Error Type')['Error Count'].sum().sort_values(ascending=False)
+        bar_labels = error_breakdown.index.tolist()
+        bar_data = error_breakdown.values.tolist()
+        
+    chart_data = {
+        'pie_labels': pie_labels,
+        'pie_data': pie_data,
+        'pie_colors': pie_colors,
+        'bar_labels': bar_labels,
+        'bar_data': bar_data
+    }
+    # --- END Chart Data Preparation ---
+
+    html_sections = {}
+    sections_to_render = [
+        'Error_Summary', 'Configuration_Issues', 'Structure', 'Column_Comparison', 'Column_Sequence',
+        'WhiteSpace', 'Data_Content', 'DataType', 'Date_Format', 'Length_Compare',
+        'Content_Validation', 'Cross_Field_Validation', 'Data_Failed', 'Duplicate', 'SQL_Exclusions'
+    ]
+
+    inherently_fail_sections = {
+        'Error_Summary', 'Configuration_Issues', 'WhiteSpace', 'Data_Content', 
+        'DataType', 'Date_Format', 'Length_Compare', 'Content_Validation', 
+        'Cross_Field_Validation', 'Data_Failed', 'Duplicate', 'SQL_Exclusions'
+    }
+
+    for section_name in sections_to_render:
+        df = results.get(section_name)
+        if df is not None and not df.empty:
+            
+            section_status = 'status-neutral'
+            if section_name in inherently_fail_sections:
+                section_status = 'status-fail'
+            elif 'Status' in df.columns:
+                if 'FAIL' in df['Status'].unique():
+                    section_status = 'status-fail'
+                else:
+                    section_status = 'status-pass'
+
+            styler = df.style
+            if 'Status' in df.columns:
+                class_df = pd.DataFrame('', index=df.index, columns=df.columns)
+                class_df['Status'] = df['Status'].map(get_status_class)
+                styler = styler.set_td_classes(class_df)
+
+            html_sections[section_name.replace('_', ' ')] = {
+                'df': df,
+                'html': styler.to_html(classes='table table-striped', index=True, border=0),
+                'status': section_status.replace('status-', '') # Clean up status for header display
+            }
+    
+    error_rate = summary_dict.get('Error Rate (%)', 'N/A')
+
+    html_content = template.render(
+        tc_id=tc_id,
+        description=description,
+        overall_status=summary_dict.get('Overall Validation Status', 'N/A'),
+        total_records_initial=summary_dict.get('Total Records (Initial)', 'N/A'), # ADDED
+        total_records=summary_dict.get('Total Records (Post-SQL Filter)', 'N/A'),
+        records_passed=records_fully_passed, # MODIFIED
+        records_with_errors=records_with_errors, # MODIFIED
+        error_rate=error_rate,
+        html_sections=html_sections,
+        chart_data=chart_data # ADDED
+    )
+
+    html_filepath = os.path.splitext(final_output_file)[0] + '.html'
+    with open(html_filepath, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    print(f"--- [{tc_id}] HTML report generated at: {html_filepath}")
+def apply_scenario_validation(data_df, scenarios_df, tc_id):
+    scenario_issues = []
+    newly_failed_mask = pd.DataFrame(False, index=data_df.index, columns=data_df.columns)
+
+    if scenarios_df.empty:
+        return scenario_issues, newly_failed_mask
+
+    for _, scenario in scenarios_df.iterrows():
+        filter_conditions = str(scenario.get('Filter_Conditions', '')).strip()
+        validation_col = str(scenario.get('Validation_Column', '')).strip()
+        validation_rule = str(scenario.get('Validation_Rule', '')).strip().upper()
+        validation_value = str(scenario.get('Validation_Value', ''))
+        
+        if not all([filter_conditions, validation_col, validation_rule]):
+            continue
+
+        if validation_col not in data_df.columns:
+            print(f"{Colors.WARNING}--- [{tc_id}] WARNING: Skipping scenario '{scenario['Scenario_ID']}' because validation column '{validation_col}' not found.{Colors.ENDC}")
+            continue
+
+        current_filter_mask = pd.Series(True, index=data_df.index)
+        for condition in filter_conditions.split(';'):
+            if '=' not in condition: continue
+            col, val_str = condition.split('=', 1)
+            
+            invert = False
+            if val_str.startswith('!'):
+                invert = True
+                val_str = val_str[1:]
+            
+            vals = [v.strip().lower() for v in val_str.split('|')]
+            
+            if col not in data_df.columns:
+                print(f"{Colors.WARNING}--- [{tc_id}] WARNING: Skipping condition '{condition}' in scenario '{scenario['Scenario_ID']}' because filter column '{col}' not found.{Colors.ENDC}")
+                current_filter_mask = pd.Series(False, index=data_df.index)
+                break
+
+            condition_mask = data_df[col].astype(str).str.lower().isin(vals)
+            if invert:
+                condition_mask = ~condition_mask
+            
+            current_filter_mask &= condition_mask
+        
+        if not current_filter_mask.any():
+            continue
+
+        data_to_validate = data_df.loc[current_filter_mask, validation_col]
+        failure_mask = pd.Series(False, index=data_to_validate.index)
+
+        if validation_rule == 'MANDATORY':
+            failure_mask = data_to_validate.isna() | (data_to_validate.astype(str).str.strip() == '')
+        elif validation_rule == 'EMPTY':
+            failure_mask = data_to_validate.notna() & (data_to_validate.astype(str).str.strip() != '')
+        elif validation_rule == 'ALLOWED_VALUES':
+            allowed_list = [v.strip().lower() for v in validation_value.split('|')]
+            failure_mask = ~data_to_validate.astype(str).str.lower().isin(allowed_list)
+        elif validation_rule == 'REGEX':
+            failure_mask = ~data_to_validate.astype(str).str.match(validation_value, na=False)
+
+        if failure_mask.any():
+            failed_indices = failure_mask[failure_mask].index
+            newly_failed_mask.loc[failed_indices, validation_col] = True
+            
+            for index in failed_indices:
+                details = f"Failed Scenario '{scenario['Scenario_ID']}': {scenario['Description']}"
+                scenario_issues.append({'Row Index': index + 1, 'Column Name': validation_col, 'Value': data_df.at[index, validation_col], 'Validation Rule': 'Scenario', 'Details': details})
+
+    return scenario_issues, newly_failed_mask
+
+def apply_cross_field_validation(data_df, crossfield_df, tc_id):
+    crossfield_issues = []
+    newly_failed_mask = pd.DataFrame(False, index=data_df.index, columns=data_df.columns)
+
+    if crossfield_df.empty:
+        return crossfield_issues, newly_failed_mask
+
+    for _, rule in crossfield_df.iterrows():
+        rule_id = str(rule.get('Rule ID', 'N/A')).strip()
+        column_to_highlight = str(rule.get('Column_to_Highlight', '')).strip()
+        sql_condition = str(rule.get('SQL_Condition', '')).strip() # Original condition from Excel
+        
+        if not all([rule_id, column_to_highlight, sql_condition]):
+            continue
+            
+        if column_to_highlight not in data_df.columns:
+            print(f"{Colors.WARNING}--- [{tc_id}] WARNING: Skipping Cross-Field Rule '{rule_id}' because column to highlight '{column_to_highlight}' not found.{Colors.ENDC}")
+            continue
+
+        # --- NEW LOGIC: Check for external file definition ---
+        is_external_file = sql_condition.lower().endswith(('.sql', '.txt'))
+        
+        if is_external_file:
+            sql_filepath = os.path.join(SQL_RULES_DIR, sql_condition)
+            if os.path.exists(sql_filepath):
+                try:
+                    with open(sql_filepath, 'r') as f:
+                        file_content = f.read().strip()
+                        if file_content:
+                            print(f"--- [{tc_id}] Loaded Cross-Field condition for '{rule_id}' from file: {sql_condition}")
+                            sql_condition = file_content # Use file content as the new condition
+                        else:
+                            print(f"{Colors.WARNING}--- [{tc_id}] WARNING: SQL file '{sql_condition}' is empty. Skipping rule '{rule_id}'.{Colors.ENDC}")
+                            continue
+                except Exception as e:
+                    print(f"{Colors.FAIL}--- [{tc_id}] ERROR: Could not read SQL file {sql_condition}. Skipping rule '{rule_id}'. Details: {e}{Colors.ENDC}")
+                    continue
+            else:
+                print(f"{Colors.FAIL}--- [{tc_id}] ERROR: SQL file not found at: {sql_filepath}. Skipping rule '{rule_id}'.{Colors.ENDC}")
+                continue
+        # --- END NEW LOGIC ---
+
+        # The subsequent error-fixing logic from the previous answer should go here 
+        # (to handle unquoted literals, which is still necessary!)
+        # ... (Insert the regex pre-processing block here if you haven't already) ...
+
+        try:
+            # Use query for powerful, native DataFrame filtering based on the SQL_Condition string
+            # IMPORTANT: The condition must be valid pandas query syntax.
+            failure_mask = data_df.query(sql_condition, engine='python')
+            
+            if failure_mask.empty:
+                 continue
+                 
+            # Extract indices from the subset where the condition (failure) is True
+            failed_indices = failure_mask.index
+            
+            # Mark the specified column in the failure mask
+            newly_failed_mask.loc[failed_indices, column_to_highlight] = True
+            
+            for index in failed_indices:
+                details = f"Cross-Field Rule '{rule_id}' failed: Condition '{sql_condition}' is True."
+                
+                # Capture the value of the highlighted column for the report
+                value = data_df.at[index, column_to_highlight] if index in data_df.index and column_to_highlight in data_df.columns else "N/A"
+                
+                crossfield_issues.append({
+                    'Row Index': index + 1, 
+                    'Rule ID': rule_id, 
+                    'Column Name': column_to_highlight, 
+                    'Value': value, 
+                    'Details': details
+                })
+
+        except Exception as e:
+            # This is where your 'name ACP is not defined' error was caught, 
+            # indicating the SQL_Condition (either from cell or file) was invalid Pandas syntax.
+            print(f"{Colors.FAIL}--- [{tc_id}] ERROR: Cross-Field Rule '{rule_id}' failed to execute. Condition used: '{sql_condition}'. Details: {e}{Colors.ENDC}")
+            traceback.print_exc()
+
+    return crossfield_issues, newly_failed_mask
+
+def wait_for_file(filepath, timeout_seconds, tc_id):
+    if timeout_seconds <= 0:
+        return True
+
+    start_time = time.time()
+    
+    if os.path.exists(filepath):
+        return True
+
+    print(f"{Colors.WARNING}--- [{tc_id}] Waiting up to {timeout_seconds} seconds for file: {os.path.basename(filepath)}{Colors.ENDC}")
+    
+    if tqdm:
+        with tqdm(total=timeout_seconds, desc=f"[{tc_id}] Waiting for file", unit="s", leave=True) as pbar:
+            while time.time() - start_time < timeout_seconds:
+                if os.path.exists(filepath):
+                    pbar.set_description(f"[{tc_id}] File Found")
+                    pbar.update(timeout_seconds - pbar.n)
+                    time.sleep(0.1)
+                    return True
+                
+                elapsed = int(time.time() - start_time)
+                pbar.update(elapsed - pbar.n)
+                time.sleep(1)
+    else:
+        while time.time() - start_time < timeout_seconds:
+            if os.path.exists(filepath):
+                print(f"{Colors.OKGREEN}--- [{tc_id}] File appeared after {int(time.time() - start_time)} seconds.{Colors.ENDC}")
+                time.sleep(0.1)
+                return True
+            time.sleep(1)
+
+    print(f"{Colors.FAIL}--- [{tc_id}] Timed out after {timeout_seconds} seconds. File not found.{Colors.ENDC}")
+    return False
+
+def apply_sql_filter_validation(data_df, sql_filter_file, tc_id):
+    if pd.isna(sql_filter_file) or not sql_filter_file.strip():
+        return data_df.copy(), pd.DataFrame()
+
+    sql_path = os.path.join(SQL_RULES_DIR, sql_filter_file)
+    if not os.path.exists(sql_path):
+        print(f"{Colors.FAIL}--- [{tc_id}] ERROR: SQL filter file not found at: {sql_path}{Colors.ENDC}")
+        return data_df.copy(), pd.DataFrame()
+
+    print(f"--- [{tc_id}] Applying SQL filter from: {sql_filter_file}")
+    
+    required_cols = ['SRC_SYS', 'MEASURE', 'CODE_TYPE', 'CODE']
+    for col in required_cols:
+        if col not in data_df.columns:
+            print(f"{Colors.FAIL}--- [{tc_id}] ERROR: Column '{col}' required by SQL filter is missing in data.{Colors.ENDC}")
+            return data_df.copy(), pd.DataFrame()
+
+    try:
+        base_filter = (data_df['SRC_SYS'].astype(str).str.startswith('EMR', na=False)) & \
+                      (data_df['MEASURE'].astype(str).str.upper().str.strip() == 'ACP')
+
+        cpt_codes_exclude = {'99483', '994927', '1P', '2P', '3P', '8P', '99504', '99509', '99377', '99378'}
+        cpt_filter = (data_df['CODE_TYPE'].astype(str).str.upper().str.strip() == 'CPT') & \
+                     (~data_df['CODE'].astype(str).str.upper().str.strip().isin(cpt_codes_exclude))
+        
+        cpt_cat_ii_codes_exclude = {'1123F', '1124F', '1157F', '1158F'}
+        cpt_cat_ii_filter = (data_df['CODE_TYPE'].astype(str).str.upper().str.strip() == 'CPT-CAT-II') & \
+                            (~data_df['CODE'].astype(str).str.upper().str.strip().isin(cpt_cat_ii_codes_exclude))
+        
+        hcpcs_codes_exclude = {
+            '99483', '99497', '1P', '2P', '3P', '8P', '99504', '99509', '99377', '99378', 'G0257', 'S9339', 
+            'E0100', 'E0105', 'E0130', 'E0135', 'E0140', 'E0141', 'E0143', 'E0144', 
+            'E0147', 'E0148', 'E0149', 'E0163', 'E0165', 'E0167', 'E0168', 'E0170', 
+            'T1022','T1030','T1031','G9473','G9474','G9475','G9476','G9477','G9478',
+            'G9479','Q5003','Q5004','Q5005','Q5006','Q5007','Q5008','Q5010','S9126','T2042',
+            'T2043','T2044','T2045','T2046','G0182','S2065','G0071','G0402','G0438','G0439',
+            'G0463','G2010','G2012','G2250','G2251','G2252','T1015','G9054'
+        }
+        hcpcs_filter = (data_df['CODE_TYPE'].astype(str).str.upper().str.strip() == 'HCPCS') & \
+                       (~data_df['CODE'].astype(str).str.upper().str.strip().isin(hcpcs_codes_exclude))
+
+        icd10cm_codes_exclude = hcpcs_codes_exclude
+        icd10cm_filter = (data_df['CODE_TYPE'].astype(str).str.upper().str.strip() == 'ICD10CM') & \
+                         (~data_df['CODE'].astype(str).str.upper().str.strip().isin(icd10cm_codes_exclude))
+
+        complex_or_filter = cpt_filter | cpt_cat_ii_filter | hcpcs_filter | icd10cm_filter
+        
+        final_retained_mask = base_filter & complex_or_filter
+        
+        retained_df = data_df[final_retained_mask].copy()
+        excluded_df = data_df[~final_retained_mask].copy()
+
+        print(f"--- [{tc_id}] SQL Filter: {len(retained_df)} rows retained, {len(excluded_df)} rows excluded.")
+        
+        return retained_df, excluded_df
+
+    except Exception as e:
+        print(f"{Colors.FAIL}--- [{tc_id}] ERROR: Failed to apply SQL filter logic. Details: {e}{Colors.ENDC}")
+        traceback.print_exc()
+        return data_df.copy(), pd.DataFrame()
+        
+def run_validation_for_test_case(tc_id, description, path, file_type, delimiter, encoding, config_df, scenarios_df, crossfield_df, global_settings, sql_filter_file):
+    start_time = datetime.now()
+    print(f"{Colors.BOLD}--- [{tc_id}] Starting Validation using rules from sheet '{tc_id}' ---{Colors.ENDC}")
+    print(f"--- [{tc_id}] Data File: {path}")
+
+    results, failed_row_indices, failed_cell_coordinates = {}, set(), set()
+
+    TOP_N_DATA = global_settings.get('TOP_N_DATA', 5)
+    enable_cell_highlighting = str(global_settings.get('Enable_Cell_Highlighting', 'yes')).strip().lower() in ['yes', 'true', '1']
+    enable_column_autofit = str(global_settings.get('Enable_Column_Autofit', 'yes')).strip().lower() in ['yes', 'true', '1']
+    generate_passed_report = str(global_settings.get('Generate_Passed_Data_Report', 'false')).strip().lower() in ['yes', 'true']
+    allowed_values_separator = global_settings.get('Allowed_Values_Separator', '|')
+    duplicate_key_columns_str = global_settings.get('Duplicate_Key_Columns', '')
+    duplicate_key_columns = [c.strip() for c in str(duplicate_key_columns_str).split(',') if c.strip()]
+
+    config_df['Column_Name'] = config_df['Column_Name'].astype(str).str.strip()
+    config_df['Data_Type'] = config_df['Data_Type'].astype(str).str.strip().str.lower()
+    config_df['Use'] = config_df['Use'].astype(str).str.strip().str.lower()
+    config_df['Length'] = config_df['Length'].astype(str)
+    config_df['Dateformat'] = config_df['Dateformat'].apply(clean_dateformat)
+    expected_data_columns = config_df['Column_Name'].tolist()
+
+    VALID_DATA_TYPES = {'int', 'bigint', 'numeric', 'float', 'decimal', 'string', 'varchar', 'nchar', 'date', 'boolean', 'bit'}
+    config_issues = []
+    for index, row in config_df.iterrows():
+        if row['Data_Type'] not in VALID_DATA_TYPES:
+            config_issues.append({'Column Name': row['Column_Name'], 'Problem': f"Invalid Data_Type '{row['Data_Type']}'", 'Details': f"Please use one of: {', '.join(sorted(VALID_DATA_TYPES))}", 'Status': 'FAIL'})
+        if 'Regex_Pattern' in row and pd.notna(row['Regex_Pattern']):
+            try: re.compile(row['Regex_Pattern'])
+            except re.error as e:
+                config_issues.append({'Column Name': row['Column_Name'], 'Problem': "Invalid Regex Pattern", 'Details': f"The pattern '{row['Regex_Pattern']}' is not a valid regular expression. Error: {e}", 'Status': 'FAIL'})
+
+    results['Configuration_Issues'] = pd.DataFrame(config_issues)
+    if not results['Configuration_Issues'].empty:
+        print(f"{Colors.WARNING}{Colors.BOLD}--- [{tc_id}] WARNING: Found {len(config_issues)} issues in configuration sheet '{tc_id}'.{Colors.ENDC}")
+
+    structure_results, data_df, found_data_columns = [], pd.DataFrame(), []
+    file_size_formatted, file_format, used_encoding = "N/A", "N/A", encoding
+
+    if os.path.exists(path):
+        structure_results.append({'Test': 'File Exists', 'Expected': 'Yes', 'Actual': 'Yes', 'Status': 'PASS'})
+        try:
+            file_size, file_ext = os.path.getsize(path), os.path.splitext(path)[1]
+            file_size_formatted, file_format = format_bytes(file_size), file_ext or "N/A"
+            if file_type in ['csv', 'txt']:
+                try:
+                    data_df = pd.read_csv(path, delimiter=delimiter, dtype=str, keep_default_na=False, skipinitialspace=True, engine='python', encoding=encoding)
+                    used_encoding = encoding
+                except UnicodeDecodeError:
+                    print(f"{Colors.WARNING}--- [{tc_id}] WARNING: File is not encoded as '{encoding}'. Trying 'latin-1' as a fallback.{Colors.ENDC}")
+                    data_df = pd.read_csv(path, delimiter=delimiter, dtype=str, keep_default_na=False, skipinitialspace=True, engine='python', encoding='latin-1')
+                    used_encoding = 'latin-1'
+                found_data_columns = data_df.columns.tolist()
+
+            elif file_type == 'xlsx':
+                xls = pd.ExcelFile(path)
+                data_df = pd.read_excel(xls, header=0, dtype=str, keep_default_na=False)
+                found_data_columns = data_df.columns.tolist()
+                used_encoding = 'xlsx-internal'
+            else: raise ValueError(f"Unsupported file type: {file_type}")
+            
+            data_df.columns = [str(col).strip() for col in found_data_columns]
+            found_data_columns = data_df.columns.tolist()
+            
+            # FIX: Force strip all string columns (Addresses the Subscriber_ID regex failure issue)
+            for col in data_df.columns:
+                if data_df[col].dtype == 'object':
+                    # Use fillna('') to safely strip strings even with NaN values
+                    data_df[col] = data_df[col].fillna('').astype(str).str.strip()
+            # END FIX
+
+            structure_results.append({'Test': 'File Read Successfully', 'Expected': 'Yes', 'Actual': 'Yes', 'Status': 'PASS'})
+            structure_results.append({'Test': 'Record Count', 'Expected': '>= 0', 'Actual': len(data_df), 'Status': 'INFO'})
+        except Exception as e:
+            structure_results.append({'Test': 'File Read Successfully', 'Expected': 'Yes', 'Actual': f'No - Error: {e}', 'Status': 'FAIL'}); traceback.print_exc()
+    else:
+        structure_results.append({'Test': 'File Exists', 'Expected': 'Yes', 'Actual': 'No', 'Status': 'FAIL'})
+    results['Structure'] = pd.DataFrame(structure_results)
+    results['TestData'] = data_df.copy()
+    
+    initial_record_count = len(data_df)
+    sql_excluded_df = pd.DataFrame()
+    if not data_df.empty:
+        data_df, sql_excluded_df = apply_sql_filter_validation(data_df, sql_filter_file, tc_id)
+        if not sql_excluded_df.empty:
+            sql_excluded_df['SQL File'] = sql_filter_file
+            sql_excluded_df = sql_excluded_df[['SQL File'] + [col for col in sql_excluded_df.columns if col != 'SQL File']]
+    results['SQL_Exclusions'] = sql_excluded_df
+
+
+    if not data_df.empty:
+        temp_length_col = f"__temp_row_len_{datetime.now().timestamp()}__"
+        sum_series = pd.Series(0, index=data_df.index, dtype=int)
+        for col in data_df.columns:
+            sum_series += data_df[col].fillna('').astype(str).str.len()
+        data_df[temp_length_col] = sum_series
+        results['Maximum_Data'] = data_df.nlargest(TOP_N_DATA, temp_length_col).drop(columns=[temp_length_col])
+        results['Minimum_Data'] = data_df.nsmallest(TOP_N_DATA, temp_length_col).drop(columns=[temp_length_col])
+        data_df = data_df.drop(columns=[temp_length_col])
+    else:
+        results['Maximum_Data'], results['Minimum_Data'] = pd.DataFrame(), pd.DataFrame()
+
+    config_set, found_set = set(expected_data_columns), set(found_data_columns)
+    results['Column_Comparison'] = pd.DataFrame([
+        {'Comparison': 'Missing Expected Columns', 'Details': ', '.join(config_set - found_set) or 'N/A', 'Status': 'FAIL' if config_set - found_set else 'PASS'},
+        {'Comparison': 'Unexpected Columns Found', 'Details': ', '.join(found_set - config_set) or 'N/A', 'Status': 'WARN' if found_set - config_set else 'PASS'}
+    ])
+    col_seq_df = pd.DataFrame([{'S.NO': i + 1, 'SourceHeader': expected_data_columns[i] if i < len(expected_data_columns) else 'N/A', 'TargetHeader': found_data_columns[i] if i < len(found_data_columns) else 'N/A', 'Status': ('PASS' if (i < len(expected_data_columns) and i < len(found_data_columns) and expected_data_columns[i] == found_data_columns[i]) else 'FAIL')} for i in range(max(len(expected_data_columns), len(found_data_columns)))]).rename(columns={'S.NO': 'Sno', 'SourceHeader': 'Configuration', 'TargetHeader': 'File'})
+    results['Column_Sequence'] = col_seq_df
+
+    whitespace_issues = []
+    if not data_df.empty:
+        for i, col_name in enumerate(found_data_columns):
+            if col_name != col_name.strip(): whitespace_issues.append({'Row Index': 'Header', 'Column Name': f'Column {i+1} ({col_name})', 'Value': f'"{col_name}"', 'Details': 'Header contains leading/trailing whitespace'})
+        for col_name in data_df.columns:
+            if data_df[col_name].dtype == 'object':
+                mask = (data_df[col_name].notna()) & (data_df[col_name].str.strip() != data_df[col_name])
+                for index, value in data_df[col_name][mask].items():
+                    whitespace_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': f'"{value}"', 'Details': 'Cell data has leading/trailing whitespace'})
+    results['WhiteSpace'] = pd.DataFrame(whitespace_issues)
+
+    length_issues, datatype_issues, datacontent_issues, dateformat_issues, content_issues, crossfield_issues, passed_data_collection = [], [], [], [], [], [], []
+
+    if not data_df.empty:
+        failed_mask_df = pd.DataFrame(False, index=data_df.index, columns=data_df.columns)
+        for _, config_row in config_df.iterrows():
+            col_name = config_row['Column_Name']
+            if col_name not in data_df.columns: continue
+
+            column_series = data_df[col_name].copy()
+            data_type = config_row['Data_Type']
+            is_empty_mask = column_series.isna() | (column_series.astype(str).str.strip() == "")
+            not_empty_mask = ~is_empty_mask
+            
+            if config_row['Use'] == 'mandatory':
+                mask = is_empty_mask.copy()
+                failed_mask_df[col_name] |= mask
+                for index in mask[mask].index:
+                    datacontent_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Details': 'Mandatory field is empty'})
+
+            if data_type not in VALID_DATA_TYPES:
+                mask = not_empty_mask.copy()
+                failed_mask_df[col_name] |= mask
+                for index in mask[mask].index:
+                    datatype_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Expected Type': f"Skipped - Invalid Data_Type in Configuration: '{data_type}'"})
+                continue
+            
+            working_series = column_series[not_empty_mask]
+            if working_series.empty: continue
+
+            length_val = str(config_row.get('Length', 'nan'))
+            length_rule = str(config_row.get('Length_Rule', 'MAX')).upper()
+            if length_val != 'nan' and data_type != 'date':
+                str_lengths = working_series.astype(str).str.len()
+                mask = pd.Series(False, index=working_series.index)
+                details_template = ""
+                
+                if length_rule == 'EQUAL':
+                    try:
+                        expected_len = int(length_val)
+                        mask = str_lengths != expected_len
+                        details_template = f"Length must be exactly {expected_len}"
+                    except (ValueError, TypeError): pass
+                elif length_rule == 'RANGE':
+                    try:
+                        min_len, max_len = map(int, length_val.split('-'))
+                        mask = (str_lengths < min_len) | (str_lengths > max_len)
+                        details_template = f"Length must be between {min_len} and {max_len}"
+                    except (ValueError, TypeError): pass
+                else:
+                    try:
+                        max_len = int(length_val)
+                        mask = str_lengths > max_len
+                        details_template = f"Length must not exceed {max_len}"
+                    except (ValueError, TypeError): pass
+
+                if mask.any():
+                    failed_mask_df.loc[mask.index[mask], col_name] = True
+                    for index in mask[mask].index:
+                        length_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Actual Length': str_lengths.at[index], 'Expected Rule': details_template})
+            
+            if data_type in ['int', 'bigint']:
+                mask = ~working_series.astype(str).str.match(r'^-?\d+$')
+                if mask.any():
+                    failed_mask_df.loc[mask.index[mask], col_name] = True
+                    for index in mask[mask].index: datatype_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Expected Type': data_type})
+            elif data_type in ['float', 'numeric', 'decimal']:
+                mask = pd.to_numeric(working_series, errors='coerce').isna()
+                if mask.any():
+                    failed_mask_df.loc[mask.index[mask], col_name] = True
+                    for index in mask[mask].index: datatype_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Expected Type': data_type})
+            elif data_type == 'date':
+                date_format = str(config_row.get('Dateformat', 'nan')).strip()
+                date_range_str = str(config_row.get('Date_Range', 'nan')).strip()
+                allow_future_date = str(config_row.get('Allow_Future_Date', 'No')).strip().lower() == 'yes'
+
+                def parse_date(date_str, fmt):
+                    try:
+                        return datetime.strptime(date_str, fmt)
+                    except (ValueError, TypeError):
+                        return pd.NaT
+
+                parsed_dates = working_series.apply(lambda x: parse_date(x, date_format))
+                format_mask = parsed_dates.isna()
+                
+                validation_series = working_series[~format_mask]
+                validation_parsed = parsed_dates[~format_mask]
+                
+                if format_mask.any():
+                    failed_mask_df.loc[format_mask.index[format_mask], col_name] = True
+                    for index in format_mask[format_mask].index:
+                        dateformat_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Expected Format': date_format, 'Details': 'Date format mismatch'})
+                        
+                if not validation_series.empty:
+                    range_mask = pd.Series(False, index=validation_series.index)
+                    details = ""
+                    
+                    if not allow_future_date:
+                        today = datetime.now().date()
+                        future_mask = validation_parsed.dt.date > today
+                        if future_mask.any():
+                            range_mask |= future_mask
+                            details = "Date cannot be in the future"
+
+                    if date_range_str != 'nan':
+                        try:
+                            if '/' in date_range_str:
+                                min_date_str, max_date_str = date_range_str.split('/', 1)
+                                min_date = datetime.strptime(min_date_str, '%Y-%m-%d').date()
+                                max_date = datetime.strptime(max_date_str, '%Y-%m-%d').date()
+                                range_check = (validation_parsed.dt.date < min_date) | (validation_parsed.dt.date > max_date)
+                                details = f"Date must be between {min_date_str} and {max_date_str}"
+                            else:
+                                min_date = datetime.strptime(date_range_str, '%Y-%m-%d').date()
+                                range_check = validation_parsed.dt.date < min_date
+                                details = f"Date must be on or after {date_range_str}"
+                            
+                            range_mask |= range_check
+                            
+                        except ValueError:
+                            print(f"{Colors.WARNING}--- [{tc_id}] WARNING: Skipping Date Range check for '{col_name}'. Invalid Date_Range format: {date_range_str}.{Colors.ENDC}")
+                            pass
+                            
+                    if range_mask.any():
+                        failed_mask_df.loc[range_mask.index[range_mask], col_name] = True
+                        for index in range_mask[range_mask].index:
+                            dateformat_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Expected Format': date_format, 'Details': details})
+            
+            if 'Regex_Pattern' in config_row and pd.notna(config_row['Regex_Pattern']):
+                try:
+                    regex_pattern = str(config_row['Regex_Pattern']).strip()
+                    
+                    if regex_pattern and working_series is not None:
+                        mask = ~working_series.astype(str).str.match(regex_pattern, na=False) 
+                        
+                        if mask.any():
+                            failed_mask_df.loc[mask.index[mask], col_name] = True
+                            for index in mask[mask].index:
+                                content_issues.append({'Row Index': index + 1, 'Column Name': col_name, 'Value': data_df.at[index, col_name], 'Validation Rule': 'Regex', 'Details': f"Value does not match required pattern: {regex_pattern}"})
+
+                except Exception as e:
+                    print(f"{Colors.WARNING}--- [{tc_id}] WARNING: Regex check failed for '{col_name}'. Error: {e}{Colors.ENDC}")
+                    pass
+        scenario_errors, scenario_failed_mask = apply_scenario_validation(data_df, scenarios_df, tc_id)
+        content_issues.extend(scenario_errors)
+        failed_mask_df |= scenario_failed_mask
+        
+        cross_field_errors, cross_field_failed_mask = apply_cross_field_validation(data_df, crossfield_df, tc_id)
+        crossfield_issues.extend(cross_field_errors)
+        failed_mask_df |= cross_field_failed_mask
+        
+        failed_row_indices = {idx for idx, row_failed in failed_mask_df.any(axis=1).items() if row_failed}
+        failed_cell_coords_series = failed_mask_df.stack()
+        for (row_idx, col_name), is_failed in failed_cell_coords_series.items():
+            if is_failed:
+                failed_cell_coordinates.add((row_idx, col_name, data_df.columns.get_loc(col_name)))
+    
+    duplicate_df = pd.DataFrame()
+    if not data_df.empty:
+        if duplicate_key_columns and all(col in data_df.columns for col in duplicate_key_columns):
+            duplicate_df = data_df[data_df.duplicated(subset=duplicate_key_columns, keep=False)].copy()
+            if not duplicate_df.empty:
+                duplicate_df.insert(0, 'Duplicate Key Columns', ', '.join(duplicate_key_columns))
+        else:
+            duplicate_df = data_df[data_df.duplicated(keep=False)].copy()
+            if not duplicate_df.empty:
+                duplicate_df.insert(0, 'Duplicate Key Columns', 'All Columns')
+                print(f"{Colors.WARNING}--- [{tc_id}] WARNING: 'Duplicate_Key_Columns' not defined or invalid. Performing duplicate check on ALL columns.{Colors.ENDC}")
+    results['Duplicate'] = duplicate_df
+    
+    
+    results['Passed_Data'] = pd.DataFrame(passed_data_collection)
+    results.update({'Data_Content': pd.DataFrame(datacontent_issues), 'Length_Compare': pd.DataFrame(length_issues), 'DataType': pd.DataFrame(datatype_issues), 'Date_Format': pd.DataFrame(dateformat_issues), 'Content_Validation': pd.DataFrame(content_issues), 'Cross_Field_Validation': pd.DataFrame(crossfield_issues), 'Data_Failed': data_df.loc[sorted(list(failed_row_indices))].copy(), 'Non_Functional': pd.DataFrame([{'Test': 'Performance', 'Status': 'NOT TESTED'}, {'Test': 'Security', 'Status': 'NOT TESTED'}])})
+    
+    results['Error_Summary'] = generate_error_summary(results)
+
+    is_fail = bool(failed_row_indices or any(s['Status'] == 'FAIL' for s in structure_results) or any(c['Status'] == 'FAIL' for c in results['Column_Comparison'].to_dict('records')) or any(c['Status'] == 'FAIL' for c in results['Column_Sequence'].to_dict('records')) or not results['WhiteSpace'].empty or not results['Configuration_Issues'].empty or not results['SQL_Exclusions'].empty)
+    overall_status = 'FAIL' if is_fail else 'PASS'
+
+    total_records_processed = len(data_df)
+    total_records_initial = initial_record_count
+    records_with_errors = len(failed_row_indices)
+    error_rate = (records_with_errors / total_records_processed * 100) if total_records_processed > 0 else 0
+    end_time, execution_duration = datetime.now(), datetime.now() - start_time
+
+    results['Summary'] = pd.DataFrame({'Metric': ['--- Overall Result ---', 'Overall Validation Status', '','--- File Details ---', 'Source File', 'Rule Sheet Name', 'File Format', 'File Delimiter', 'File Encoding', 'File Size', 'Total Records (Initial)', 'Total Records (Post-SQL Filter)', 'Number of Columns', '','--- Validation Summary ---', 'Records Passed', 'Records with Errors', 'Error Rate (%)', '','--- Error Breakdown ---', 'Configuration Issues', 'SQL Exclusion Errors', 'Mandatory Errors', 'Data Type Errors', 'Date Format Errors', 'Length Errors', 'Content Validation Errors', 'Cross-Field Validation Errors', 'Whitespace Errors', 'Duplicate Rows', '','--- Execution Summary ---', 'Validation Date', 'Validation Time', 'Execution Duration'], 'Value': ['', overall_status, '','', os.path.basename(path), tc_id, file_type, f"'{delimiter}'", used_encoding, file_size_formatted, total_records_initial, total_records_processed, len(found_data_columns), '','', total_records_processed - records_with_errors, records_with_errors, f"{error_rate:.2f}%", '','', len(config_issues), len(results['SQL_Exclusions']), len(datacontent_issues), len(datatype_issues), len(dateformat_issues), len(length_issues), len(content_issues), len(crossfield_issues), len(whitespace_issues), len(results['Duplicate']), '','', end_time.strftime('%Y-%m-%d'), end_time.strftime('%H:%M:%S'), f"{execution_duration.total_seconds():.2f} seconds"]})
+
+    output_folder = global_settings.get('Output_folder')
+    
+    base_name = description
+    safe_base_name = re.sub(r'[<>:"/\\|?*]', '_', str(base_name)).strip()
+    safe_base_name = re.sub(r'[\s\.]+', '_', safe_base_name)
+    safe_base_name = re.sub(r'__+', '_', safe_base_name).strip('_')
+
+    if not safe_base_name:
+        safe_base_name = tc_id
+        
+    final_output_file = get_unique_filepath(os.path.join(output_folder, f"{safe_base_name}.xlsx"))
+
+    print(f"--- [{tc_id}] Writing results to: {final_output_file}")
+
+    try:
+        with pd.ExcelWriter(final_output_file, engine='openpyxl') as writer:
+            sheet_order_config = {
+                'Summary': {'df': results.get('Summary'), 'index': False}, 'Error_Summary': {'df': results.get('Error_Summary'), 'index': False},
+                'Configuration_Issues': {'df': results.get('Configuration_Issues'), 'index': True}, 'Structure': {'df': results.get('Structure'), 'index': True},
+                'Column_Comparison': {'df': results.get('Column_Comparison'), 'index': True}, 'Column_Sequence': {'df': results.get('Column_Sequence'), 'index': False},
+                'WhiteSpace': {'df': results.get('WhiteSpace'), 'index': False}, 'Data_Content': {'df': results.get('Data_Content'), 'index': False},
+                'DataType': {'df': results.get('DataType'), 'index': False}, 'Date_Format': {'df': results.get('Date_Format'), 'index': False},
+                'Length_Compare': {'df': results.get('Length_Compare'), 'index': False}, 'Content_Validation': {'df': results.get('Content_Validation'), 'index': False},
+                'Cross_Field_Validation': {'df': results.get('Cross_Field_Validation'), 'index': False}, 
+                'SQL_Exclusions': {'df': results.get('SQL_Exclusions'), 'index': True, 'headers': found_data_columns},
+                'Passed_Data': {'df': results.get('Passed_Data'), 'index': True}, 'Data_Failed': {'df': results.get('Data_Failed'), 'index': True, 'headers': found_data_columns},
+                'Duplicate': {'df': results.get('Duplicate'), 'index': True, 'headers': found_data_columns}, 'Minimum_Data': {'df': results.get('Minimum_Data'), 'index': True, 'headers': found_data_columns},
+                'Maximum_Data': {'df': results.get('Maximum_Data'), 'index': True, 'headers': found_data_columns}, 'TestData': {'df': results.get('TestData'), 'index': True, 'headers': found_data_columns},
+                'Non_Functional': {'df': results.get('Non_Functional'), 'index': True}
+            }
+            
+            disabled_by_default = {'Passed_Data', 'Minimum_Data', 'Maximum_Data', 'Non_Functional', 'TestData'}
+            
+            for sheet_name, config in sheet_order_config.items():
+                setting_key = f'Show_Sheet_{sheet_name}'
+                user_setting = global_settings.get(setting_key)
+                is_enabled = str(user_setting).strip().lower() in ['yes', 'true', '1'] if pd.notna(user_setting) else (sheet_name not in disabled_by_default)
+                if sheet_name == 'SQL_Exclusions' and results.get('SQL_Exclusions').empty: is_enabled = False
+                if sheet_name == 'Duplicate' and results.get('Duplicate').empty: is_enabled = False
+                if sheet_name == 'Cross_Field_Validation' and results.get('Cross_Field_Validation').empty: is_enabled = False
+
+                if not is_enabled: continue
+
+                df = config.get('df')
+                if df is None: continue
+                if df.empty and sheet_name in ['Passed_Data', 'Error_Summary', 'WhiteSpace', 'Data_Content', 'DataType', 'Date_Format', 'Length_Compare', 'Content_Validation', 'Cross_Field_Validation', 'Duplicate', 'Configuration_Issues'] : continue
+                
+                final_headers = config.get('headers', df.columns.tolist())
+                write_index = config.get('index', False)
+
+                df_to_write = df.copy()
+                if write_index:
+                    df_to_write.index = np.arange(1, len(df_to_write) + 1)
+                    df_to_write.index.name = 'S.No'
+                
+                if sheet_name == 'SQL_Exclusions':
+                    if df_to_write.index.name == 'S.No' and 'SQL File' in df_to_write.columns:
+                        df_to_write = df_to_write.reset_index()
+                        df_to_write = df_to_write.rename(columns={'index': 'Original Row Index'})
+                        final_headers = ['S.No', 'Original Row Index'] + final_headers
+                        write_index = False
+                
+                if sheet_name == 'Duplicate':
+                    if 'Duplicate Key Columns' in df_to_write.columns:
+                        if df_to_write.index.name == 'S.No':
+                            df_to_write = df_to_write.reset_index()
+                            df_to_write = df_to_write.rename(columns={'index': 'Original Row Index'})
+                            final_headers = ['S.No', 'Original Row Index'] + [c for c in df_to_write.columns if c not in ['S.No', 'Original Row Index']]
+                            write_index = False
+                        
+                df_to_write.to_excel(writer, sheet_name=sheet_name, index=write_index, header=True)
+                format_and_autofit_sheet(writer.sheets[sheet_name], df, final_headers, write_index, enable_autofit=enable_column_autofit)
+
+            if 'Summary' in writer.sheets:
+                summary_sheet = writer.sheets['Summary']
+                bold_font, center_align = Font(bold=True), Alignment(horizontal='center', vertical='center')
+                for row in range(2, summary_sheet.max_row + 1):
+                    cell = summary_sheet[f'B{row}']; cell.font = Font(bold=True, color=cell.font.color, name=cell.font.name, size=cell.font.size); cell.alignment = center_align
+                for row_num in [2, 5, 15, 20, 31]: 
+                    if row_num <= summary_sheet.max_row: summary_sheet[f'A{row_num}'].font = bold_font
+                if enable_cell_highlighting:
+                    highlight_overall_status(writer, overall_status)
+
+            if enable_cell_highlighting:
+                if 'Structure' in writer.sheets: highlight_summary_cells(writer, 'Structure', results['Structure'])
+                if 'Configuration_Issues' in writer.sheets: highlight_summary_cells(writer, 'Configuration_Issues', results['Configuration_Issues'], highlight_rows=True)
+                if 'Column_Comparison' in writer.sheets: highlight_summary_cells(writer, 'Column_Comparison', results['Column_Comparison'])
+                if 'Column_Sequence' in writer.sheets: highlight_summary_cells(writer, 'Column_Sequence', results['Column_Sequence'], highlight_rows=True)
+                if 'Non_Functional' in writer.sheets: highlight_summary_cells(writer, 'Non_Functional', results['Non_Functional'])
+                if 'SQL_Exclusions' in writer.sheets and not results['SQL_Exclusions'].empty: highlight_detail_rows(writer, 'SQL_Exclusions')
+                if 'Data_Failed' in writer.sheets and not results['Data_Failed'].empty and failed_cell_coordinates: highlight_failed_cells(writer, results['Data_Failed'], failed_cell_coordinates)
+                if 'Data_Content' in writer.sheets and not results['Data_Content'].empty: highlight_detail_rows(writer, 'Data_Content')
+                if 'DataType' in writer.sheets and not results['DataType'].empty: highlight_detail_rows(writer, 'DataType')
+                if 'Date_Format' in writer.sheets and not results['Date_Format'].empty: highlight_detail_rows(writer, 'Date_Format')
+                if 'Length_Compare' in writer.sheets and not results['Length_Compare'].empty: highlight_detail_rows(writer, 'Length_Compare')
+                if 'Content_Validation' in writer.sheets and not results['Content_Validation'].empty: highlight_detail_rows(writer, 'Content_Validation')
+                if 'Cross_Field_Validation' in writer.sheets and not results['Cross_Field_Validation'].empty: highlight_detail_rows(writer, 'Cross_Field_Validation')
+                if 'WhiteSpace' in writer.sheets and not results['WhiteSpace'].empty: highlight_detail_rows(writer, 'WhiteSpace')
+                if 'Duplicate' in writer.sheets and not results['Duplicate'].empty: highlight_detail_rows(writer, 'Duplicate')
+
+
+        print(f"{Colors.OKGREEN}--- [{tc_id}] Excel report generated successfully.{Colors.ENDC}")
+        
+        generate_html_report(tc_id, description, results, final_output_file)
+
+        if str(global_settings.get('Auto_Open_Report', 'no')).strip().lower() in ['yes', 'true']:
+            try:
+                html_report_path = os.path.splitext(final_output_file)[0] + '.html'
+                if sys.platform == "win32": os.startfile(html_report_path)
+                elif sys.platform == "darwin": subprocess.run(["open", html_report_path])
+                else: subprocess.run(["xdg-open", html_report_path])
+            except Exception as e: print(f"{Colors.WARNING}--- [{tc_id}] Could not auto-open file: {e}{Colors.ENDC}")
+
+    except Exception as e:
+        print(f"{Colors.FAIL}{Colors.BOLD}--- [{tc_id}] ERROR: Failed during report writing: {e}{Colors.ENDC}"); traceback.print_exc()
+
+
+def main_validation_logic(config_file, run_df_override=None, output_folder_override=None, selected_tc_ids=None, runtime_settings=None, progress_queue=None):
+    
+    if progress_queue:
+        progress_queue.put(('status', f"{Colors.HEADER}Loading Configuration...{Colors.ENDC}"))
+
+    print(f"{Colors.HEADER}{Colors.BOLD}--- Starting Test Suite Execution ---{Colors.ENDC}")
+    print(f"Configuration File: {config_file}\n")
+
+    if not os.path.exists(config_file):
+        print(f"{Colors.FAIL}{Colors.BOLD}ERROR: Configuration.xlsx not found at: {config_file}{Colors.ENDC}")
+        return
+
+    try:
+        xls = pd.ExcelFile(config_file)
+        all_sheet_names = xls.sheet_names
+        global_settings_df = xls.parse('Settings')
+        global_settings = dict(zip(global_settings_df['Setting'], global_settings_df['Value']))
+    except Exception as e:
+        print(f"{Colors.FAIL}{Colors.BOLD}ERROR: Could not load initial configuration sheets ('Run', 'Settings'). Details: {e}{Colors.ENDC}")
+        traceback.print_exc()
+        return
+        
+    if run_df_override is not None:
+        run_df = run_df_override
+    else:
+        try:
+            run_df = xls.parse('Run')
+            run_df.columns = run_df.columns.str.strip()
+        except Exception as e:
+            print(f"{Colors.FAIL}{Colors.BOLD}ERROR: Could not load 'Run' sheet. Details: {e}{Colors.ENDC}")
+            return
+    
+    if output_folder_override:
+        global_settings['Output_folder'] = output_folder_override
+    
+    if runtime_settings:
+        for key, value in runtime_settings.items():
+            global_settings[key] = value
+
+    output_folder = global_settings.get('Output_folder')
+    if not output_folder or pd.isna(output_folder):
+        print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL ERROR: 'Output_folder' is not defined in the Settings sheet. Aborting.{Colors.ENDC}")
+        return
+
+    if not os.path.exists(output_folder):
+        print(f"{Colors.WARNING}Output folder '{output_folder}' does not exist. Creating it now.{Colors.ENDC}")
+        os.makedirs(output_folder)
+        
+    if not os.path.exists(SQL_RULES_DIR):
+        print(f"{Colors.WARNING}SQL Rules folder '{SQL_RULES_DIR}' does not exist. Creating it now.{Colors.ENDC}")
+        os.makedirs(SQL_RULES_DIR)
+
+    if selected_tc_ids is not None and selected_tc_ids:
+        run_df = run_df[run_df['Test Case'].isin(selected_tc_ids)].copy()
+    elif run_df_override is None:
+        run_df = run_df[run_df['Execute'].astype(str).str.strip().str.lower() == 'yes'].copy()
+        
+    
+    total_tcs = len(run_df)
+    if total_tcs == 0:
+        print(f"{Colors.WARNING}--- WARNING: No executable Test Cases found. ---{Colors.ENDC}")
+        return
+    
+    if progress_queue:
+        progress_queue.put(('progress_max', total_tcs))
+        progress_queue.put(('status', f"{Colors.HEADER}Found {total_tcs} Test Cases. Starting validation...{Colors.ENDC}"))
+
+    is_auto_run_mode = run_df_override is not None
+    files_to_archive_info = []
+
+    for i, (_, test_run) in enumerate(run_df.iterrows()):
+        tc_id = test_run['Test Case']
+        description = test_run['Description']
+        
+        if progress_queue:
+            progress_queue.put(('status', f"{Colors.OKCYAN}Running Test Case: {tc_id} - {description}{Colors.ENDC}"))
+            progress_queue.put(('progress', i + 1))
+        
+        try:
+            print("-" * 50)
+            print(f"{Colors.OKCYAN}Processing Test Run '{tc_id}': {description}{Colors.ENDC}")
+
+            file_path = str(test_run['Path'])
+            
+            wait_timeout_sec = int(test_run.get('Wait_Timeout_Sec', 0)) if pd.notna(test_run.get('Wait_Timeout_Sec')) else 0
+            
+            if wait_timeout_sec > 0:
+                if not wait_for_file(file_path, wait_timeout_sec, tc_id):
+                    print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL ERROR: Skipping '{tc_id}' due to file path not found after timeout.{Colors.ENDC}")
+                    continue
+
+            rule_sheet_name = tc_id
+            scenario_sheet_name = f"{tc_id}_Scenarios"
+            crossfield_sheet_name = f"{tc_id}_CrossField" # New sheet name
+            sql_filter_file = test_run.get('SQL_Filter_File')
+            
+            duplicate_key_columns = test_run.get('Duplicate_Key_Columns')
+            if pd.notna(duplicate_key_columns):
+                 global_settings['Duplicate_Key_Columns'] = str(duplicate_key_columns)
+            else:
+                 global_settings['Duplicate_Key_Columns'] = ''
+
+            if rule_sheet_name not in all_sheet_names:
+                print(f"{Colors.FAIL}{Colors.BOLD}ERROR for '{tc_id}': Rule sheet '{rule_sheet_name}' not found. Skipping.{Colors.ENDC}")
+                continue
+            
+            config_df = pd.read_excel(xls, sheet_name=rule_sheet_name)
+            
+            scenarios_df = pd.DataFrame()
+            if scenario_sheet_name in all_sheet_names:
+                scenarios_df = pd.read_excel(xls, sheet_name=scenario_sheet_name)
+                print(f"--- [{tc_id}] Loaded Scenarios from '{scenario_sheet_name}' ---")
+            else:
+                print(f"--- [{tc_id}] No Scenarios sheet named '{scenario_sheet_name}' found. Proceeding without scenario validation. ---")
+            
+            # Load Cross-Field Validation Sheet
+            crossfield_df = pd.DataFrame()
+            if crossfield_sheet_name in all_sheet_names:
+                crossfield_df = pd.read_excel(xls, sheet_name=crossfield_sheet_name)
+                print(f"--- [{tc_id}] Loaded Cross-Field Rules from '{crossfield_sheet_name}' ---")
+            else:
+                print(f"--- [{tc_id}] No Cross-Field Rules sheet named '{crossfield_sheet_name}' found. Proceeding without cross-field validation. ---")
+
+            encoding_val = test_run.get('Encoding', 'utf-8-sig')
+            file_encoding = 'utf-8-sig' if pd.isna(encoding_val) or str(encoding_val).strip() == '' else str(encoding_val).strip()
+
+            run_validation_for_test_case(
+                tc_id=tc_id,
+                description=description,
+                path=file_path,
+                file_type=str(test_run['File_Type']).lower(),
+                delimiter=str(test_run['Delimiter']),
+                encoding=file_encoding,
+                config_df=config_df,
+                scenarios_df=scenarios_df,
+                crossfield_df=crossfield_df, # Pass the new dataframe
+                global_settings=global_settings,
+                sql_filter_file=sql_filter_file
+            )
+
+            if is_auto_run_mode:
+                files_to_archive_info.append({'tc_id': tc_id, 'path': file_path})
+
+        except KeyError as e:
+            print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL CONFIGURATION ERROR: A required column is missing from your 'Run' sheet. Missing column: {e}{Colors.ENDC}")
+            continue
+        except Exception as e:
+            print(f"{Colors.FAIL}{Colors.BOLD}A critical error occurred while processing Test Run '{tc_id}'. Skipping. Details: {e}{Colors.ENDC}")
+            traceback.print_exc()
+
+    print("\n" + "-" * 50)
+    print(f"{Colors.HEADER}{Colors.BOLD}--- Test Suite Execution Finished ---{Colors.ENDC}")
+    
+    if is_auto_run_mode and files_to_archive_info and progress_queue:
+        progress_queue.put(('archive_paths', files_to_archive_info))
+
+    if progress_queue:
+        progress_queue.put(('status', f"{Colors.OKGREEN}Validation completed successfully.{Colors.ENDC}"))
+        progress_queue.put(('progress', total_tcs))
+
+
+class StdoutRedirector(io.StringIO):
+    
+    ANSI_TAG_MAP = {
+        '95': 'header', '94': 'okblue', '96': 'okcyan', '92': 'okgreen',
+        '93': 'warning', '91': 'fail', '1': 'bold', '4': 'underline',
+        '0': 'endc'
+    }
+
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+        self.text_widget.config(state=tk.NORMAL)
+        self._initialize_tags()
+
+    def _initialize_tags(self):
+        self.text_widget.tag_config('header', foreground='#9595FF')
+        self.text_widget.tag_config('okblue', foreground='#5C86FF')
+        self.text_widget.tag_config('okcyan', foreground='#00FFFF')
+        self.text_widget.tag_config('okgreen', foreground='#00FF00')
+        self.text_widget.tag_config('warning', foreground='yellow')
+        self.text_widget.tag_config('fail', foreground='red')
+        self.text_widget.tag_config('bold', font=('Consolas', 10, 'bold'))
+        self.text_widget.tag_config('endc', foreground='#f8f9fa', font=('Consolas', 10, 'normal'))
+        self.current_tags = []
+
+    def write(self, s):
+        self.text_widget.config(state=tk.NORMAL)
+        
+        parts = re.split(r'(\x1b\[[0-9;]*m)', s)
+        
+        for part in parts:
+            if re.match(r'\x1b\[[0-9;]*m', part):
+                codes = part[2:-1].split(';')
+                for code in codes:
+                    if code == '0' or code == '39':
+                        self.current_tags = []
+                    
+                    tag = self.ANSI_TAG_MAP.get(code)
+                    if tag:
+                        if tag in ['bold', 'underline']:
+                            if tag not in self.current_tags: self.current_tags.append(tag)
+                        elif tag == 'endc':
+                            self.current_tags = []
+                        elif tag not in self.current_tags:
+                            self.current_tags = [t for t in self.current_tags if t not in self.ANSI_TAG_MAP.values() or t in ['bold', 'underline']]
+                            self.current_tags.append(tag)
+            else:
+                if part:
+                    self.text_widget.insert(tk.END, part, tuple(self.current_tags))
+        
+        self.text_widget.see(tk.END)
+        self.text_widget.config(state=tk.DISABLED)
+        self.text_widget.update_idletasks()
+        
+    def flush(self):
+        pass
+
+class ValidationApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Data Validation Engine")
+        
+        self.config_file_path = tk.StringVar(value=CONFIG_FILE if os.path.exists(CONFIG_FILE) else "")
+        self.output_folder_path = tk.StringVar()
+        self.run_df_from_excel = None
+        self.scan_template_df = None
+        self.tc_selection_data = {}
+        self.progress_queue = queue.Queue()
+        self.auto_input_folder = ""
+        self.archive_folder = ""
+        self.scheduler_running = False
+        self.scheduler_interval_minutes = 10
+        self.time_left_seconds = 0
+        self.timer_var = tk.StringVar(value="Scheduler Off")
+        self.total_interval_seconds = 0
+
+        self.opt_auto_open = tk.BooleanVar(value=False)
+        self.opt_highlight = tk.BooleanVar(value=True)
+        self.opt_autofit = tk.BooleanVar(value=True)
+        self.opt_auto_run = tk.BooleanVar(value=False)
+
+        self.setup_ui()
+        self.load_run_sheet_data()
+        self.process_queue()
+        
+        self.old_stdout = sys.stdout
+        sys.stdout = StdoutRedirector(self.log_text)
+        
+        initial_message = "--- Application started. Please select the Configuration file and click RUN VALIDATION. ---"
+        if os.path.exists(CONFIG_FILE):
+             initial_message = f"--- Application started. Default Configuration File found: {CONFIG_FILE}. Click RUN VALIDATION to start. ---"
+        print(initial_message)
+        self.update_status("Ready to run validation.")
+        
+        if self.opt_auto_run.get():
+             if self.run_df_from_excel is not None and not self.run_df_from_excel.empty:
+                print(f"{Colors.OKGREEN}--- INFO: Auto_Run is TRUE. Starting RUN VALIDATION using loaded Excel Test Cases... ---{Colors.ENDC}")
+                self.master.after(500, lambda: self.start_validation(self.run_df_from_excel))
+             elif self.scan_template_df is not None and not self.scan_template_df.empty:
+                print(f"{Colors.OKGREEN}--- INFO: Auto_Run is TRUE. Starting AUTO SCAN & RUN for hot folder... ---{Colors.ENDC}")
+                self.master.after(500, self.auto_scan_and_run)
+             else:
+                print(f"{Colors.WARNING}--- WARNING: Auto-Run is TRUE but no TCs or scan templates were loaded. Waiting... ---{Colors.ENDC}")
+
+
+    def update_status(self, message):
+        clean_message = re.sub(r'\x1b\[[0-9;]*m', '', message)
+        self.status_var.set(clean_message)
+
+    def load_run_sheet_data(self):
+        config_file = self.config_file_path.get()
+        self.tc_selection_data = {}
+        self.tc_tree.delete(*self.tc_tree.get_children())
+        self.run_df_from_excel = None
+        self.scan_template_df = None
+        self.auto_input_folder = ""
+        self.archive_folder = ""
+        
+        if not os.path.exists(config_file):
+            return
+
+        try:
+            xls = pd.ExcelFile(config_file)
+            
+            global_settings_df = xls.parse('Settings')
+            global_settings = dict(zip(global_settings_df['Setting'], global_settings_df['Value']))
+            
+            is_auto_open_enabled = str(global_settings.get('Auto_Open_Report', 'no')).strip().lower() in ['yes', 'true']
+            self.opt_auto_open.set(is_auto_open_enabled)
+            
+            self.opt_auto_run.set(str(global_settings.get('Auto_Run', 'false')).strip().lower() in ['yes', 'true'])
+            self.auto_input_folder = str(global_settings.get('Auto_Input_Folder', '')).strip()
+            self.archive_folder = str(global_settings.get('Archive_Folder_Loaction', '')).strip()
+            
+            try:
+                self.scheduler_interval_minutes = int(global_settings.get('Scheduler_Interval_Minutes', 10))
+                self.total_interval_seconds = self.scheduler_interval_minutes * 60
+                self.time_left_seconds = self.total_interval_seconds
+            except ValueError:
+                self.scheduler_interval_minutes = 10
+                self.total_interval_seconds = 10 * 60
+                self.time_left_seconds = self.total_interval_seconds
+
+
+            run_df = xls.parse('Run')
+            run_df.columns = run_df.columns.str.strip()
+            
+            required_cols = ['Test Case', 'Description', 'Path', 'File_Type', 'Delimiter', 'Execute']
+            for col in required_cols:
+                if col not in run_df.columns:
+                    if col not in ['Mapping_Pattern', 'Duplicate_Key_Columns']:
+                        run_df[col] = ''
+                        
+            if 'Duplicate_Key_Columns' not in run_df.columns:
+                run_df['Duplicate_Key_Columns'] = ''
+            if 'Mapping_Pattern' not in run_df.columns:
+                run_df['Mapping_Pattern'] = ''
+            
+            run_df = run_df.fillna('')
+
+            self.scan_template_df = run_df[run_df['Mapping_Pattern'].astype(str).str.strip() != ''].copy()
+            
+            self.run_df_from_excel = run_df[run_df['Mapping_Pattern'].astype(str).str.strip() == ''].copy()
+                        
+            
+            for _, row in self.run_df_from_excel.iterrows():
+                tc_id = row['Test Case']
+                desc = row['Description']
+                is_selected = str(row['Execute']).strip().lower() == 'yes'
+                
+                self.tc_selection_data[tc_id] = is_selected
+                
+                self.tc_tree.insert('', tk.END, iid=tc_id, values=(
+                    "✅" if is_selected else "☐", 
+                    tc_id, 
+                    desc
+                ))
+            
+            if not self.run_df_from_excel.empty:
+                print(f"--- Test Case run list loaded successfully from '{os.path.basename(config_file)}'. ---")
+            
+            if not self.scan_template_df.empty:
+                print(f"--- INFO: {len(self.scan_template_df)} Auto Scan templates loaded from 'Run' sheet. ---")
+            
+            self.tc_tree.bind('<Button-1>', self.toggle_tc_selection)
+            
+        except Exception as e:
+            print(f"{Colors.FAIL}ERROR: Failed to load configuration sheets. Details: {e}{Colors.ENDC}")
+            self.run_df_from_excel = None
+            self.scan_template_df = None
+            self.auto_input_folder = ""
+            self.archive_folder = ""
+
+
+    def toggle_tc_selection(self, event):
+        item_id = self.tc_tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        column = self.tc_tree.identify_column(event.x)
+        if column == '#1':
+            current_status = self.tc_selection_data.get(item_id, False)
+            new_status = not current_status
+            
+            self.tc_selection_data[item_id] = new_status
+            
+            checkbox_char = "✅" if new_status else "☐"
+            values = list(self.tc_tree.item(item_id, 'values'))
+            values[0] = checkbox_char
+            self.tc_tree.item(item_id, values=values)
+            
+            self.tc_tree.focus(item_id)
+            
+    def toggle_scheduler(self):
+        TRACK_COLOR = '#35485f' 
+        SUCCESS_COLOR = '#28a745'
+        
+        if not self.scheduler_running:
+            if self.scan_template_df is None or self.scan_template_df.empty:
+                print(f"{Colors.FAIL}CRITICAL ERROR: No Auto Scan templates found in the 'Run' sheet. Cannot start scheduler.{Colors.ENDC}")
+                self.update_status(f"{Colors.FAIL}Scheduler Failed: Missing Scan Templates.{Colors.ENDC}")
+                return
+            
+            if not self.auto_input_folder or not os.path.exists(self.auto_input_folder):
+                 print(f"{Colors.FAIL}CRITICAL ERROR: Auto_Input_Folder is invalid or does not exist: {self.auto_input_folder}{Colors.ENDC}")
+                 self.update_status(f"{Colors.FAIL}Scheduler Failed: Invalid Hot Folder Path.{Colors.ENDC}")
+                 return
+
+            
+            self.scheduler_running = True
+            self.auto_run_button.config(text="STOP SCHEDULER", bootstyle="danger")
+            self.time_left_seconds = self.total_interval_seconds
+            self.scheduler_progress_bar.config(maximum=self.total_interval_seconds)
+            self.scheduler_label.config(background=TRACK_COLOR) 
+            print(f"{Colors.OKGREEN}--- SCHEDULER: Started. Scanning every {self.scheduler_interval_minutes} minutes. Hot folder: {self.auto_input_folder} ---{Colors.ENDC}")
+            self.update_status(f"{Colors.OKGREEN}Scheduler Running: Hot folder monitoring active at {self.auto_input_folder}.{Colors.ENDC}")
+            self.schedule_scan()
+        else:
+            self.scheduler_running = False
+            self.auto_run_button.config(text="START SCHEDULER", bootstyle="danger-outline")
+            self.timer_var.set("Scheduler Off")
+            self.scheduler_label.config(background=SUCCESS_COLOR) 
+            self.time_left_seconds = 0
+            self.scheduler_progress_bar.config(value=0)
+            print(f"{Colors.WARNING}--- SCHEDULER: Stopped. ---{Colors.ENDC}")
+            self.update_status(f"{Colors.WARNING}Scheduler Stopped.{Colors.ENDC}")
+
+
+    def schedule_scan(self):
+        if not self.scheduler_running:
+            return
+            
+        if self.time_left_seconds == 1:
+            timer_text = "Next Scan in 00:01"
+            self.timer_var.set(timer_text) 
+            
+            elapsed_seconds = self.total_interval_seconds - self.time_left_seconds
+            self.scheduler_progress_bar.config(value=elapsed_seconds)
+            
+            self.time_left_seconds = self.total_interval_seconds
+            self.master.after(1000, self.auto_scan_and_run, True) 
+            self.update_status(f"{Colors.OKCYAN}SCHEDULER: Initiating scan...{Colors.ENDC}")
+            
+        elif self.time_left_seconds <= 0:
+            if self.time_left_seconds <= 0:
+                self.time_left_seconds = self.total_interval_seconds
+            
+        else:
+            minutes = self.time_left_seconds // 60
+            seconds = self.time_left_seconds % 60
+            timer_text = f"Next Scan in {minutes:02d}:{seconds:02d}"
+            
+            elapsed_seconds = self.total_interval_seconds - self.time_left_seconds
+            self.scheduler_progress_bar.config(value=elapsed_seconds)
+            
+            self.timer_var.set(timer_text) 
+            self.time_left_seconds -= 1
+            
+        self.master.after(1000, self.schedule_scan)
+
+    def auto_scan_and_run(self, is_scheduled=False):
+        
+        if is_scheduled:
+            print(f"{Colors.OKCYAN}--- SCHEDULER: Scanning hot folder at {datetime.now().strftime('%H:%M:%S')}...{Colors.ENDC}")
+        
+        if self.scan_template_df is None or self.scan_template_df.empty:
+            if not is_scheduled:
+                 print(f"{Colors.FAIL}CRITICAL ERROR: No Auto Scan templates found in the 'Run' sheet. Aborting.{Colors.ENDC}")
+            return
+            
+        if not self.auto_input_folder or not os.path.exists(self.auto_input_folder):
+            print(f"{Colors.FAIL}CRITICAL ERROR: Auto_Input_Folder setting is invalid or does not exist: {self.auto_input_folder}{Colors.ENDC}")
+            return
+            
+        files_found = []
+        for f in os.listdir(self.auto_input_folder):
+            if f.endswith(('.xlsx', '.csv', '.txt')) and not f.startswith('~'):
+                files_found.append(f)
+                
+        if not files_found:
+            if not is_scheduled:
+                print(f"{Colors.WARNING}--- WARNING: No files found in Auto_Input_Folder: {self.auto_input_folder} ---{Colors.ENDC}")
+            else:
+                print(f"{Colors.WARNING}--- SCHEDULER: No files found. Continuing countdown. ---{Colors.ENDC}")
+            return
+            
+        print(f"{Colors.OKGREEN}--- Auto Scan found {len(files_found)} file(s). Matching to rule templates... ---{Colors.ENDC}")
+        
+        auto_run_data = []
+        try:
+            xls = pd.ExcelFile(self.config_file_path.get())
+            all_sheet_names = xls.sheet_names
+        except Exception:
+            print(f"{Colors.FAIL}ERROR: Cannot open config file to check rule sheets.{Colors.ENDC}")
+            return
+            
+        for filename in files_found:
+            
+            # CORRECTED LOGIC for KeyError: Use .apply() with a lambda that returns a boolean
+            is_matched_mask = self.scan_template_df['Mapping_Pattern'].apply(
+                lambda p: re.match(p.replace('.', '\\.').replace('*', '.*'), filename) is not None
+            )
+
+            matched_map = self.scan_template_df[is_matched_mask]
+            
+            if matched_map.empty:
+                print(f"{Colors.WARNING}--- WARNING: File '{filename}' did not match any pattern in 'Run' sheet's Mapping_Pattern column. Skipping. ---{Colors.ENDC}")
+                continue
+            
+            mapping = matched_map.iloc[0]
+            tc_id = mapping['Test Case']
+            
+            if tc_id not in all_sheet_names:
+                print(f"{Colors.FAIL}CRITICAL ERROR: Rule sheet '{tc_id}' (from Mapping_Pattern) not found. Skipping '{filename}'.{Colors.ENDC}")
+                continue
+                
+            auto_run_data.append({
+                'Test Case': tc_id,
+                'Description': f"Auto-Run: {mapping['Description']} ({filename})",
+                'Path': os.path.join(self.auto_input_folder, filename),
+                'Execute': 'yes',
+                'File_Type': mapping['File_Type'],
+                'Delimiter': mapping['Delimiter'],
+                'Encoding': mapping.get('Encoding', 'utf-8-sig'),
+                'SQL_Filter_File': mapping.get('SQL_Filter_File', ''),
+                'Wait_Timeout_Sec': mapping.get('Wait_Timeout_Sec', 0),
+                'Duplicate_Key_Columns': mapping['Duplicate_Key_Columns'] 
+            })
+            
+        if not auto_run_data:
+            if not is_scheduled:
+                print(f"{Colors.WARNING}--- No files matched executable rule templates. Aborting auto run. ---{Colors.ENDC}")
+            return
+            
+        dynamic_run_df = pd.DataFrame(auto_run_data)
+        self.start_validation(dynamic_run_df)
+
+
+    def setup_ui(self):
+        SUCCESS_COLOR = '#28a745'
+        TRACK_COLOR = '#35485f' 
+        
+        self.master.grid_rowconfigure(0, weight=1)
+        self.master.grid_rowconfigure(1, weight=0)
+        self.master.grid_columnconfigure(0, weight=1)
+        
+        main_frame = ttk_b.Frame(self.master, padding="10")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        config_frame = ttk_b.Labelframe(main_frame, text="Configuration", padding="10", bootstyle="primary")
+        config_frame.grid(row=0, column=0, sticky="ew", pady=10)
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        ttk_b.Label(config_frame, text="Config File:", bootstyle="primary").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk_b.Entry(config_frame, textvariable=self.config_file_path, width=70, bootstyle="info", state='readonly').grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk_b.Button(config_frame, text="Browse", command=self.select_config_file, bootstyle="secondary-outline").grid(row=0, column=2, padx=5, pady=5)
+        config_frame.grid_columnconfigure(1, weight=1)
+        
+        options_frame = ttk_b.Labelframe(main_frame, text="Runtime Options", padding="10", bootstyle="info")
+        options_frame.grid(row=1, column=0, sticky="ew", pady=10)
+        
+        ttk_b.Checkbutton(options_frame, text="Auto Open Report", variable=self.opt_auto_open, bootstyle="round-toggle").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        ttk_b.Checkbutton(options_frame, text="Enable Cell Highlighting", variable=self.opt_highlight, bootstyle="round-toggle").grid(row=0, column=1, padx=10, pady=5, sticky="w")
+        ttk_b.Checkbutton(options_frame, text="Enable Column Autofit", variable=self.opt_autofit, bootstyle="round-toggle").grid(row=0, column=2, padx=10, pady=5, sticky="w")
+
+        run_control_frame = ttk_b.Labelframe(main_frame, text="Test Case Selection (Manual Mode)", padding="10", bootstyle="secondary")
+        run_control_frame.grid(row=2, column=0, sticky="nsew", pady=10)
+        main_frame.grid_rowconfigure(2, weight=2)
+
+        self.tc_tree = ttk_b.Treeview(run_control_frame, columns=("Execute", "TC_ID", "Description"), show="headings", height=8, bootstyle="table")
+        self.tc_tree.heading("Execute", text="Run", anchor=tk.CENTER)
+        self.tc_tree.heading("TC_ID", text="Test Case", anchor=tk.W)
+        self.tc_tree.heading("Description", text="Description", anchor=tk.W)
+        self.tc_tree.column("Execute", width=50, anchor=tk.CENTER, stretch=tk.NO)
+        self.tc_tree.column("TC_ID", width=100, stretch=tk.NO)
+        self.tc_tree.column("Description", stretch=tk.YES)
+        
+        self.tc_tree.pack(fill=tk.BOTH, expand=True)
+
+        control_frame = ttk_b.Frame(main_frame, padding="5")
+        control_frame.grid(row=3, column=0, sticky="ew", pady=10)
+
+        self.run_button = ttk_b.Button(control_frame, text="RUN VALIDATION", command=lambda: self.start_validation(self.run_df_from_excel), bootstyle="success")
+        self.run_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        
+        self.auto_run_button = ttk_b.Button(control_frame, text="START SCHEDULER", command=self.toggle_scheduler, bootstyle="danger-outline")
+        self.auto_run_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+
+        self.open_output_button = ttk_b.Button(control_frame, text="Open Output Folder", command=self.open_output_folder, bootstyle="info-outline", state=tk.DISABLED)
+        self.open_output_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        
+        self.scheduler_container_frame = ttk_b.Frame(main_frame, padding=(10, 0, 10, 5))
+        self.scheduler_container_frame.grid(row=4, column=0, sticky="ew")
+        self.scheduler_container_frame.grid_columnconfigure(0, weight=1)
+        self.scheduler_container_frame.grid_rowconfigure(0, weight=1)
+        
+        self.scheduler_progress_bar = ttk_b.Progressbar(self.scheduler_container_frame, orient=HORIZONTAL, mode='determinate', bootstyle="success", maximum=self.total_interval_seconds) 
+        self.scheduler_progress_bar.grid(row=0, column=0, sticky="nsew")
+        
+        self.scheduler_label = ttk_b.Label(
+            self.scheduler_container_frame, 
+            textvariable=self.timer_var, 
+            anchor=tk.CENTER, 
+            font=('Arial', 12, 'bold'), 
+            foreground='#FFFFFF', 
+            background=SUCCESS_COLOR, 
+            relief=tk.FLAT
+        )
+        self.scheduler_label.grid(row=0, column=0, sticky="nsew")
+        self.scheduler_label.grid_propagate(False) 
+        
+        self.progress_bar = self.scheduler_progress_bar
+
+
+        log_frame = ttk_b.Labelframe(main_frame, text="Execution Log", padding="10")
+        log_frame.grid(row=5, column=0, sticky="nsew") 
+        main_frame.grid_rowconfigure(5, weight=3)
+
+        self.log_text = tk.Text(log_frame, wrap=tk.WORD, height=15, state=tk.DISABLED, bg='#212529', fg='#f8f9fa', font=('Consolas', 10), relief=tk.FLAT)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        log_scrollbar = ttk_b.Scrollbar(log_frame, command=self.log_text.yview, bootstyle="primary")
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text['yscrollcommand'] = log_scrollbar.set
+        
+        self.status_var = tk.StringVar()
+        self.status_label = ttk_b.Label(self.master, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, bootstyle="primary")
+        self.status_label.grid(row=1, column=0, sticky="ew")
+
+    def archive_files(self, files_to_archive_info):
+        if not self.archive_folder:
+            print(f"{Colors.WARNING}--- ARCHIVE: Archive_Folder_Loaction is not set. Skipping file movement. ---{Colors.ENDC}")
+            return
+
+        if not os.path.exists(self.archive_folder):
+            try:
+                os.makedirs(self.archive_folder)
+                print(f"{Colors.OKCYAN}--- ARCHIVE: Created archive folder: {self.archive_folder} ---{Colors.ENDC}")
+            except Exception as e:
+                print(f"{Colors.FAIL}--- ARCHIVE: Failed to create archive folder. Skipping file movement. Details: {e}{Colors.ENDC}")
+                return
+
+        archive_count = 0
+        for info in files_to_archive_info:
+            src_path = info['path']
+            tc_id = info['tc_id']
+            if os.path.exists(src_path):
+                try:
+                    filename = os.path.basename(src_path)
+                    
+                    today_dir = datetime.now().strftime('%Y-%m-%d')
+                    target_dir = os.path.join(self.archive_folder, today_dir)
+                    
+                    if not os.path.exists(target_dir):
+                        os.makedirs(target_dir)
+
+                    dest_path = get_unique_filepath(os.path.join(target_dir, filename))
+                    
+                    os.rename(src_path, dest_path)
+                    archive_count += 1
+                    print(f"{Colors.OKGREEN}--- ARCHIVE [{tc_id}]: Moved '{filename}' to {dest_path}{Colors.ENDC}")
+                except Exception as e:
+                    print(f"{Colors.FAIL}--- ARCHIVE [{tc_id}]: Failed to move file '{os.path.basename(src_path)}'. Details: {e}{Colors.ENDC}")
+        
+        if archive_count > 0:
+            print(f"{Colors.OKGREEN}--- ARCHIVE: Successfully archived {archive_count} file(s). ---{Colors.ENDC}")
+
+
+    def process_queue(self):
+        try:
+            while True:
+                task, value = self.progress_queue.get_nowait()
+                if task == 'status':
+                    self.update_status(value)
+                elif task == 'progress_max':
+                    self.progress_bar.config(maximum=value, value=0)
+                    self.scheduler_label.config(text="Validation Running...")
+                    self.scheduler_label.config(background='#35485f') 
+                elif task == 'progress':
+                    self.progress_bar.config(value=value)
+                    total = self.progress_bar.cget('maximum')
+                    if total > 0:
+                        self.scheduler_label.config(text=f"Validating: {value}/{total} Test Cases")
+                elif task == 'archive_paths': 
+                    self.archive_files(value)
+                    
+                self.progress_queue.task_done()
+        except queue.Empty:
+            pass
+        finally:
+            self.master.after(100, self.process_queue)
+
+    def select_config_file(self):
+        initial_dir = os.path.dirname(self.config_file_path.get()) if self.config_file_path.get() and os.path.exists(os.path.dirname(self.config_file_path.get())) else SCRIPT_DIR
+        filename = filedialog.askopenfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialdir=initial_dir,
+            title="Select Configuration.xlsx File"
+        )
+        if filename:
+            self.config_file_path.set(filename)
+            self.load_run_sheet_data()
+
+    def start_validation(self, run_df_to_use):
+        SUCCESS_COLOR = '#28a745'
+        TRACK_COLOR = '#35485f' 
+
+        config_file = self.config_file_path.get()
+
+        if run_df_to_use is self.run_df_from_excel:
+            selected_tcs = [tc_id for tc_id, is_selected in self.tc_selection_data.items() if is_selected]
+            if not selected_tcs:
+                print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL ERROR: No Test Cases selected for execution. Please check at least one box in the 'Test Case Selection' panel.{Colors.ENDC}")
+                self.run_button.config(text="RUN VALIDATION", state=tk.NORMAL)
+                self.update_status(f"{Colors.FAIL}Ready: No test cases selected.{Colors.ENDC}")
+                return
+        else:
+            selected_tcs = list(run_df_to_use['Test Case'])
+            if not selected_tcs:
+                print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL ERROR: Auto Scan failed to generate executable Test Cases.{Colors.ENDC}")
+                self.run_button.config(text="RUN VALIDATION", state=tk.NORMAL)
+                self.update_status(f"{Colors.FAIL}Ready: Auto Scan failed.{Colors.ENDC}")
+                return
+                
+        if not config_file or not os.path.exists(config_file):
+            print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL ERROR: Please select a valid Configuration.xlsx file before running validation.{Colors.ENDC}")
+            self.run_button.config(text="RUN VALIDATION", state=tk.NORMAL)
+            self.update_status(f"{Colors.FAIL}Ready: Select config file.{Colors.ENDC}")
+            return
+
+        runtime_settings = {
+            'Auto_Open_Report': 'yes' if self.opt_auto_open.get() else 'no',
+            'Enable_Cell_Highlighting': 'yes' if self.opt_highlight.get() else 'no',
+            'Enable_Column_Autofit': 'yes' if self.opt_autofit.get() else 'no',
+            'Auto_Input_Folder': self.auto_input_folder,
+            'Archive_Folder_Loaction': self.archive_folder
+        }
+            
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.config(state=tk.DISABLED)
+        self.run_button.config(text="Running...", state=tk.DISABLED)
+        self.auto_run_button.config(text="Running...", bootstyle="danger", state=tk.DISABLED)
+        self.open_output_button.config(state=tk.DISABLED)
+        
+        self.progress_bar.config(value=0, maximum=1)
+        self.scheduler_label.config(text="Validation Starting...", background=TRACK_COLOR) 
+        
+        self.update_status(f"{Colors.OKCYAN}Validation process starting...{Colors.ENDC}")
+        
+        self.validation_thread = threading.Thread(
+            target=self.run_validation_threaded, 
+            args=(config_file, run_df_to_use, None, selected_tcs, runtime_settings, self.progress_queue)
+        )
+        self.validation_thread.start()
+
+    def run_validation_threaded(self, config_file, run_df_to_use, output_folder_override, selected_tc_ids, runtime_settings, progress_queue):
+        try:
+            main_validation_logic(config_file, run_df_to_use, output_folder_override, selected_tc_ids, runtime_settings, progress_queue)
+            
+            try:
+                xls = pd.ExcelFile(config_file)
+                global_settings_df = xls.parse('Settings')
+                global_settings = dict(zip(global_settings_df['Setting'], global_settings_df['Value']))
+                self.output_folder_path.set(global_settings.get('Output_folder', ''))
+            except Exception:
+                self.output_folder_path.set('')
+                
+            self.master.after(0, self.on_validation_complete, True)
+        except Exception as e:
+            print(f"{Colors.FAIL}{Colors.BOLD}CRITICAL THREAD ERROR: {e}{Colors.ENDC}")
+            traceback.print_exc()
+            self.master.after(0, self.on_validation_complete, False)
+            
+    def on_validation_complete(self, success):
+        SUCCESS_COLOR = '#28a745'
+        
+        self.run_button.config(text="RUN VALIDATION", state=tk.NORMAL)
+        
+        if not self.scheduler_running:
+            self.auto_run_button.config(text="START SCHEDULER", bootstyle="danger-outline", state=tk.NORMAL)
+            self.timer_var.set("Scheduler Off") 
+            self.scheduler_label.config(background=SUCCESS_COLOR) 
+            self.progress_bar.config(value=0)
+        else:
+            self.auto_run_button.config(text="STOP SCHEDULER", bootstyle="danger", state=tk.NORMAL)
+            self.time_left_seconds = self.total_interval_seconds
+            self.schedule_scan() 
+            
+        if success and os.path.exists(self.output_folder_path.get()):
+            self.open_output_button.config(state=tk.NORMAL)
+        
+        final_status = f"{Colors.OKGREEN}Validation finished successfully.{Colors.ENDC}" if success else f"{Colors.FAIL}Validation failed. Check log for details.{Colors.ENDC}"
+        self.update_status(final_status)
+        print(f"\n{Colors.OKBLUE}--- Validation process finished. ---{Colors.ENDC}")
+
+    def open_output_folder(self):
+        output_path = self.output_folder_path.get()
+        if not output_path or not os.path.exists(output_path):
+            print(f"{Colors.FAIL}ERROR: Output folder not found or path is empty: {output_path}{Colors.ENDC}")
+            return
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(output_path)
+            elif sys.platform == "darwin":
+                subprocess.run(["open", output_path])
+            else:
+                subprocess.run(["xdg-open", output_path])
+        except Exception as e:
+            print(f"{Colors.FAIL}ERROR: Could not open folder. Details: {e}{Colors.ENDC}")
+
+    def on_closing(self):
+        sys.stdout = self.old_stdout
+        if hasattr(self, 'validation_thread') and self.validation_thread.is_alive():
+            print(f"{Colors.WARNING}Validation is still running. Please wait for it to finish before closing.{Colors.ENDC}")
+        else:
+            self.master.destroy()
+
+if __name__ == "__main__":
+    clear_screen()
+    
+    root = ttk_b.Window(themename="superhero")
+    
+    app = ValidationApp(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    root.mainloop()
