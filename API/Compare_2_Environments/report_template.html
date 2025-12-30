@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Comparison Report | {{ metadata.collection_name }}</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f7f8;
+            color: #333;
+        }
+        .header {
+            background-color: #1f4e78;
+            color: white;
+            padding: 20px 50px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .header-title {
+            margin: 0;
+            font-size: 28px;
+        }
+        .report-metadata {
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        .quick-links {
+            margin-top: 15px; 
+            font-size: 15px;
+        }
+        .quick-links a {
+            color: white;
+            text-decoration: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .quick-links a:hover {
+            background-color: #0d3658;
+        }
+        .container {
+            padding: 20px 50px;
+        }
+        .section-title {
+            border-bottom: 2px solid #ccc;
+            padding-bottom: 5px;
+            margin-top: 30px;
+            color: #1f4e78;
+        }
+
+        /* --- CSS CLASSES FOR STATUS & DIFFS --- */
+        .soft-fail {
+            background-color: #ffeeba; /* Soft Yellow */
+            color: #856404;
+            font-weight: bold;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+		.Pass {
+            background-color: #ffeeba; /* Pass */
+            color: #155724;
+            font-weight: bold;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .danger {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .success {
+            color: #28a745;
+            font-weight: bold;
+        }
+        /* ------------------------------------- */
+
+        .metrics-grid {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 20px;
+            margin-top: 20px;
+            overflow-x: auto;
+            padding-bottom: 15px;
+        }
+        .metric-card {
+            background-color: white;
+            border-left: 5px solid #1f4e78;
+            padding: 20px;
+            flex: 1 1 0; 
+            min-width: 0; 
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+            position: relative; 
+            overflow: hidden; 
+        }
+        .metric-card:hover {
+            transform: translateY(-2px);
+        }
+        .metric-label {
+            font-size: 14px;
+            color: #666;
+            border-bottom: 1px dashed #eee;
+            padding-bottom: 5px;
+            margin-bottom: 10px;
+        }
+        .metric-value {
+            font-size: 36px;
+            font-weight: bold;
+            color: #1f4e78;
+            margin-top: 5px;
+        }
+        .metric-value.fail { color: #1f4e78; } 
+        .metric-value.warn { color: #f7a400; }
+        .metric-value.pass { color: #28a745; }
+        
+        .metric-subtext {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 0;
+            font-size: 13px;
+        }
+
+        /* BADGES */
+        .badge {
+            font-size: 11px;
+            padding: 3px 6px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin-left: 5px;
+            white-space: nowrap;
+            min-width: 20px;
+            text-align: center;
+        }
+        .badge.critical { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .badge.soft { background-color: #ffeeba; color: #856404; border: 1px solid #ffeeba; }
+        .badge.timeout { background-color: #343a40; color: #fff; border: 1px solid #343a40; }
+        .badge.security { background-color: #d84315; color: white; border: 1px solid #bf360c; }
+        .badge.stability { background-color: #ffb74d; color: #333; border: 1px solid #ffa000; }
+        .badge.schema { background-color: #a0a0ff; color: #333; border: 1px solid #7070ff; }
+        .badge.total { background-color: #dc3545; color: white; border: 1px solid #a71d2a; }
+        .badge.total-zero { background-color: #28a745; color: white; border: 1px solid #1e7e34; }
+        
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 13px; /* Slightly smaller to fit more cols */
+            table-layout: fixed;
+        }
+        .comparison-table th, .comparison-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+            word-wrap: break-word;
+            vertical-align: top;
+        }
+        .comparison-table th {
+            background-color: #1f4e78;
+            color: white;
+            cursor: pointer;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            user-select: none; /* Prevent text selection on double click */
+        }
+        .comparison-table th:hover {
+            background-color: #163a5a;
+        }
+        .comparison-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        
+        /* Table Status Colors */
+        .status-PASS { background-color: #d4edda; color: #155724; }
+        .status-FAIL { background-color: #f8d7da; color: #721c24; }
+        .status-CRITICAL { background-color: #cc3232; color: white; }
+        .status-SOFT { background-color: #ffeeb2; color: #856404; }
+        .status-TIMEOUT { background-color: #6c757d; color: white; }
+        
+        /* Record Count Colors */
+        .rec-match { background-color: #d4edda; color: #155724; font-weight: bold; }
+        .rec-mismatch { background-color: #f8d7da; color: #721c24; font-weight: bold; }
+
+        .diff-highlight {
+            background-color: #ff000030;
+            padding: 1px 3px;
+            border-radius: 3px;
+            font-weight: bold;
+        }
+        .json-box {
+            background-color: #2b2b2b;
+            color: #a9b7c6;
+            padding: 5px;
+            border-radius: 3px;
+            overflow: hidden;
+            white-space: pre-wrap;
+            font-family: Consolas, 'Courier New', Courier, monospace;
+            font-size: 11px;
+            height: 50px;
+            overflow-y: auto;
+        }
+        .response-box-content {
+            background-color: #333;
+            color: #a9b7c6;
+            padding: 10px;
+            border-radius: 5px;
+            overflow: auto;
+            white-space: pre-wrap;
+            font-family: Consolas, 'Courier New', Courier, monospace;
+            font-size: 12px;
+            height: 250px;
+        }
+        .response-diff-container {
+            display: flex;
+            gap: 20px;
+            padding: 15px 0;
+            border-top: 2px solid #ddd;
+        }
+        .response-diff-container > div {
+            flex: 1;
+        }
+        .response-header {
+            margin: 5px 0 5px 0;
+            color: #1f4e78;
+            font-weight: bold;
+            font-size: 14px;
+            border-bottom: 1px dashed #ccc;
+            padding-bottom: 3px;
+        }
+        .toggle-responses-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-right: 5px;
+            float: left;
+        }
+        .toggle-responses-btn:hover {
+            background-color: #0056b3;
+        }
+        .response-row {
+            display: none; /* Default Hide via CSS */
+            background-color: #fff;
+        }
+        .chart-container-overall {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 30px;
+            margin-top: 20px;
+        }
+        .chart-card-single {
+            background-color: white;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            flex: 1 1 0;
+            min-width: 300px;
+        }
+        .chart-wrapper {
+            position: relative;
+            height: 350px;
+        }
+        .full-width-chart {
+            background-color: white;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            margin-top: 20px;
+        }
+
+        .summary-box {
+            background-color: #e3f2fd;
+            border: 1px solid #90caf9;
+            padding: 20px;
+            margin-top: 20px;
+            border-radius: 5px;
+        }
+        .summary-box h4 {
+            color: #1565c0;
+            margin-top: 0;
+            border-bottom: 1px solid #bbdefb;
+            padding-bottom: 5px;
+        }
+        .summary-box p {
+            margin: 5px 0;
+            font-size: 15px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1 class="header-title">API Comparison Report: {{ metadata.collection_name }}</h1>
+        <div class="report-metadata">
+            <strong>Run Mode:</strong> {{ metadata.RUN_MODE }}<br>
+            <strong>ODS Endpoint:</strong> {{ metadata.ods_url }}<br>
+            <strong>PRD Endpoint:</strong> {{ metadata.prd_url }}<br>
+            <strong>Run Date:</strong> {{ metadata.run_date }}
+        </div>
+        <div class="quick-links">
+            <a href="#metrics">Metrics</a>
+            <a href="#charts">Visualizations</a>
+            <a href="#details">Details Table</a>
+        </div>
+    </div>
+
+    <div class="container">
+        
+        <h2 id="metrics" class="section-title">Visual Metrics & Key Statistics</h2>
+        
+        {% set total_tests = metadata.total_tests | int %}
+        {% set ods_passed = metrics.ods_passed | int %}
+        {% set prd_passed = metrics.prd_passed | int %}
+        
+        <!-- CALCULATE TOTAL FAILURES -->
+        {% set total_failure_count = metrics.data_diff_count|int + metrics.dynamic_diff_count|int + metrics.connection_fail_count|int + metrics.schema_fail_count|int + metrics.security_vuln_count|int + metrics.stability_fail_count|int %}
+        
+        <div class="metrics-grid">
+            <!-- 1. TOTAL TESTS CARD -->
+            <div class="metric-card">
+                <div class="metric-label">Total Tests Executed</div>
+                <div class="metric-value pass">{{ total_tests }}</div>
+            </div>
+
+            <!-- 2. CRITICAL FAILURE SUMMARY CARD -->
+            <div class="metric-card" style="flex: 1.2;">
+                <div class="metric-label">Failure Summary Breakdown</div>
+                
+                <!-- Data Mismatch -->
+                {% if metrics.data_diff_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Data Mismatch (Critical)</span>
+                    <span class="badge critical">{{ metrics.data_diff_count }}</span>
+                </div>
+                {% endif %}
+
+                <!-- Soft Fail -->
+                {% if metrics.dynamic_diff_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Soft Fail (Warnings)</span>
+                    <span class="badge soft">{{ metrics.dynamic_diff_count }}</span>
+                </div>
+                {% endif %}
+
+                <!-- Connection/Timeout -->
+                {% if metrics.connection_fail_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Timeout / Connection</span>
+                    <span class="badge timeout">{{ metrics.connection_fail_count }}</span>
+                </div>
+                {% endif %}
+                
+                <!-- Schema -->
+                {% if metrics.schema_fail_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Schema Validation Fail</span>
+                    <span class="badge schema">{{ metrics.schema_fail_count }}</span>
+                </div>
+                {% endif %}
+                
+                <!-- Security -->
+                {% if metrics.security_vuln_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Security Vulnerability</span>
+                    <span class="badge security">{{ metrics.security_vuln_count }}</span>
+                </div>
+                {% endif %}
+                
+                <!-- Stability -->
+                {% if metrics.stability_fail_count | int > 0 %}
+                <div class="metric-subtext">
+                    <span>Stability Bug (500)</span>
+                    <span class="badge stability">{{ metrics.stability_fail_count }}</span>
+                </div>
+                {% endif %}
+                
+                <!-- Success State if 0 failures -->
+                {% if total_failure_count == 0 %}
+                <div class="metric-subtext" style="justify-content: center; color: #28a745; margin-top: 5px; font-weight: bold;">
+                    All Checks Passed
+                </div>
+                {% endif %}
+
+                <!-- TOTAL FAILURE COUNT (AT BOTTOM) -->
+                <div class="metric-subtext" style="border-top: 1px dashed #ccc; margin-top: 10px; padding-top: 10px;">
+                    <span style="font-weight: bold; color: #333;">Total Failure Count</span>
+                    <span class="badge {{ 'total' if total_failure_count > 0 else 'total-zero' }}">{{ total_failure_count }}</span>
+                </div>
+
+            </div>
+            
+            <!-- 3. ODS HEALTH CARD -->
+            <div class="metric-card">
+                <div class="metric-label">ODS Health (PASS/FAIL)</div>
+                <div class="metric-value {{ 'fail' if ods_passed != total_tests else 'pass' }}">
+                    {{ ods_passed }} of {{ total_tests }}
+                </div>
+                <div class="metric-subtext" style="font-size: 11px; color: {{ '#cc3232' if ods_passed != total_tests else '#28a745' }}; margin-top: 5px;">
+                    <p style="margin: 0; line-height: 1.2;">{{ ods_passed }} tests returned 2xx status codes (Success).</p>
+                </div>
+                {% set ods_percent = (ods_passed / total_tests) * 100 if total_tests > 0 else 0 %}
+                <div class="metric-bar-container">
+                    <div class="metric-bar" style="width: {{ ods_percent }}%; background-color: #28a745; height: 4px; margin-top: 5px;"></div>
+                </div>
+            </div>
+
+            <!-- 4. PRD HEALTH CARD -->
+            <div class="metric-card">
+                <div class="metric-label">PRD Health (PASS/FAIL)</div>
+                <div class="metric-value {{ 'fail' if prd_passed != total_tests else 'pass' }}">
+                    {{ prd_passed }} of {{ total_tests }}
+                </div>
+                <div class="metric-subtext" style="font-size: 11px; color: {{ '#cc3232' if prd_passed != total_tests else '#28a745' }}; margin-top: 5px;">
+                    <p style="margin: 0; line-height: 1.2;">{{ prd_passed }} tests returned 2xx status codes (Success).</p>
+                </div>
+                {% set prd_percent = (prd_passed / total_tests) * 100 if total_tests > 0 else 0 %}
+                <div class="metric-bar-container">
+                    <div class="metric-bar" style="width: {{ prd_percent }}%; background-color: #007bff; height: 4px; margin-top: 5px;"></div>
+                </div>
+            </div>
+			
+            <!-- 5. PERFORMANCE CARD -->
+			<div class="metric-card" style="flex: 1 1 0; min-width: 250px;">
+                <div class="metric-label">Average Response Time (ms)</div>
+                <div class="metric-subtext" style="font-size: 14px; margin-bottom: 5px; color: #1f4e78; border-bottom: 1px dashed #eee; padding-bottom: 5px;">
+                    ODS Avg: <span style="font-weight: bold;">{{ metrics.avg_ods_time }} ms</span>
+                </div>
+                <div class="metric-subtext" style="font-size: 14px; margin-bottom: 10px; color: {{ '#cc3232' if metrics.perf_delta | int > 0 else '#28a745' }};">
+                    PRD Avg: <span style="font-weight: bold;">{{ metrics.avg_prd_time }} ms</span>
+                </div>
+                <div class="metric-label" style="border-bottom: none; margin-bottom: 0; padding-bottom: 0;">Difference (PRD - ODS)</div>
+                <div class="metric-value {{ 'fail' if metrics.perf_delta | int > 500 else 'warn' if metrics.perf_delta | int > 100 else 'pass' }}" style="font-size: 28px; margin-top: 0;">
+                    {% if metrics.perf_delta | int >= 0 %}+{% endif %}{{ metrics.perf_delta }} ms
+                </div>
+                <div class="metric-subtext">Factor: {{ metrics.perf_factor }}x slowdown</div>
+            </div>
+        </div>
+
+        <div class="summary-box">
+            <h4>Summary and Key Findings (Run Mode: {{ metadata.RUN_MODE }})</h4>
+            <p>{{ summary.data_integrity | safe }}</p>
+            <p>{{ summary.schema_finding | safe }}</p>
+            <p>{{ summary.perf_finding | safe }}</p>
+            <p>{{ summary.stability_finding | safe }}</p>
+            <p>{{ summary.security_finding | safe }}</p>
+        </div>
+        
+        <h2 id="charts" class="section-title">Overall Metrics Visualization</h2>
+        
+        <div class="chart-container-overall">
+            <div class="chart-card-single">
+                <h3>Data Comparison Status</h3>
+                <div class="chart-wrapper">
+                    <canvas id="dataStatusChart"></canvas>
+                </div>
+                <div style="margin-top: 10px; font-size: 12px; text-align: center;">
+                    <span style="color: rgba(75, 192, 192, 0.7);">&#9632; Pass</span> &nbsp;
+                    <span style="color: rgba(255, 99, 132, 0.7);">&#9632; Critical Fail</span> &nbsp;
+                    <span style="color: rgba(255, 205, 86, 0.7);">&#9632; Warning/Soft</span> &nbsp;
+                    <span style="color: rgba(54, 162, 235, 0.7);">&#9632; Timeout/Status</span>
+                </div>
+            </div>
+            
+            <div class="chart-card-single">
+                <h3>Average Response Time (ms)</h3>
+                <div class="chart-wrapper">
+                    <canvas id="avgResponseTimeChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card-single">
+                <h3>Scenarios by Test Type</h3>
+                <div class="chart-wrapper">
+                    <canvas id="testTypeChart"></canvas>
+                </div>
+            </div>
+
+        </div>
+
+        {% if metadata.ENABLE_PERF_GRAPH == 'YES' %}
+        <h2 class="section-title">Detailed Response Time Comparison per Test Case</h2>
+        <div class="full-width-chart">
+            <h3>Test Case Response Time Comparison (ms)</h3>
+            <div class="chart-wrapper" style="height: 400px;">
+                <canvas id="detailedResponseTimeChart"></canvas>
+            </div>
+        </div>
+        {% endif %}
+        
+        <h2 id="details" class="section-title">Detailed Test Results and Data Comparison</h2>
+        
+        <input type="text" id="searchInput" onkeyup="filterTable()" placeholder="Filter by Test Name or Summary..." style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px;">
+
+        <table id="comparisonTable" class="comparison-table">
+            <thead>
+                <tr>
+                    <th style="width: 16%;" onclick="sortTable(0)">Test Case</th>
+                    <th style="width: 7%;" onclick="sortTable(1)">Overall Status</th>
+                    <th style="width: 5%;" onclick="sortTable(2)">ODS Status</th>
+                    <th style="width: 5%;" onclick="sortTable(3)">PRD Status</th>
+                    <th style="width: 5%;" onclick="sortTable(4)">ODS Time</th>
+                    <th style="width: 5%;" onclick="sortTable(5)">PRD Time</th>
+                    <!-- New Record Count Columns -->
+                    <th style="width: 5%;" onclick="sortTable(6)">ODS Recs</th>
+                    <th style="width: 5%;" onclick="sortTable(7)">PRD Recs</th>
+                    
+                    <th style="width: 7%;" onclick="sortTable(8)">Test_Type</th>
+                    <th style="width: 6%;" onclick="sortTable(9)">Data Diff</th>
+                    <th style="width: 15%;" onclick="sortTable(10)">Data Diff Summary (Context)</th>
+                    <th style="width: 14%;" onclick="sortTable(11)">Comments/Failure Details</th>
+                    <th style="width: 5%;">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in comparison_data %}
+                
+                <!-- Determine Overall Status Row Color -->
+                {% set overall_status = 'PASS' %}
+                
+                {% if 'TIMEOUT' in item.ods_status or 'TIMEOUT' in item.prd_status %}
+                     {% set overall_status = 'TIMEOUT' %}
+                {% elif 'FAIL' in item.ods_status or 'FAIL' in item.prd_status or 'FAIL' in item.data_diff_result and 'SOFT' not in item.data_diff_result %}
+                     {% set overall_status = 'CRITICAL_FAIL' %}
+                {% elif 'SOFT' in item.data_diff_result %}
+                     {% set overall_status = 'SOFT_FAIL' %}
+                {% endif %}
+                
+                <!-- Determine Record Count Match Color -->
+                {% set rec_class = 'rec-match' %}
+                {% if item.ods_record_count != item.prd_record_count %}
+                    {% set rec_class = 'rec-mismatch' %}
+                {% endif %}
+
+                <tr class="main-row" data-row-index="{{ loop.index }}">
+                    <td>{{ item.test_name }}</td>
+                    <td class="status-{{ overall_status.split('_')[0] }}">{{ overall_status }}</td>
+                    <td class="status-{{ item.ods_status.split(' ')[0] }}">{{ item.ods_status }}</td>
+                    <td class="status-{{ item.prd_status.split(' ')[0] }}">{{ item.prd_status }}</td>
+                    <td>{{ item.ods_time }}</td>
+                    <td>{{ item.prd_time }}</td>
+                    
+                    <!-- New Columns with Conditional Formatting -->
+                    <td class="{{ rec_class }}" style="text-align: center;">{{ item.ods_record_count }}</td>
+                    <td class="{{ rec_class }}" style="text-align: center;">{{ item.prd_record_count }}</td>
+
+                    <td>{{ item.test_type }}</td>
+                    
+                    <!-- Data Diff Result with specific CSS Class passed from Python -->
+                    <td>
+                        <span class="{{ item.diff_css_class }}">
+                            {{ item.data_diff_result }}
+                        </span>
+                    </td>
+                    
+                    <td>{{ item.data_diff_summary | e }}</td>
+                    <td>{{ item.comments }}</td>
+                    <td>
+                        <button class="toggle-responses-btn" data-target="response-row-{{ loop.index }}">JSON</button>
+                    </td>
+                </tr>
+                <tr class="response-row" id="response-row-{{ loop.index }}" style="display: none;">
+                    <td colspan="13" style="padding: 0 15px 15px 15px; border-bottom: 3px solid #1f4e78;">
+                        <div style="margin-top: 10px;">
+                            <div class="response-header">Request Body</div>
+                            <div class="json-box" style="height: 100px; overflow-y: auto;">{{ item.request_body | e }}</div>
+                        </div>
+                        <div class="response-diff-container">
+                            <div>
+                                <div class="response-header">ODS Response (Highlight is the difference)</div>
+                                <div class="response-box-content">{{ item.ods_raw_response | safe }}</div>
+                            </div>
+                            <div>
+                                <div class="response-header">PRD Response (Highlight is the difference)</div>
+                                <div class="response-box-content">{{ item.prd_raw_response | safe }}</div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+
+            // --- CHART LOGIC REMAINS UNCHANGED ---
+            const statusData = JSON.parse('{{ chart_data_status_json | safe }}');
+            const ctxPie = document.getElementById('dataStatusChart').getContext('2d');
+            
+            if (ctxPie && statusData.total > 0) {
+                new Chart(ctxPie, {
+                    type: 'pie',
+                    data: {
+                        labels: [
+                            'Functional Pass (Data Match)',
+                            'Critical Fail (Data/Schema Mismatch)',
+                            'Warning (Dynamic Fields Differs)',
+                            'Status/Timeout Fails'
+                        ],
+                        datasets: [{
+                            data: [
+                                statusData.critical_pass,
+                                statusData.critical_fail,
+                                statusData.warn_diff,
+                                (statusData.status_fail || 0) + (statusData.connection_fail || 0)
+                            ],
+                            backgroundColor: [
+                                'rgba(75, 192, 192, 0.7)',
+                                'rgba(255, 99, 132, 0.7)',
+                                'rgba(255, 205, 86, 0.7)',
+                                'rgba(54, 162, 235, 0.7)'
+                            ],
+                            hoverOffset: 10
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    boxWidth: 10,
+                                    padding: 10,
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            const testTypeData = JSON.parse('{{ chart_data_test_type_json | safe }}');
+            const ctxTestType = document.getElementById('testTypeChart').getContext('2d');
+            
+            if (ctxTestType && testTypeData.counts.length > 0) {
+                new Chart(ctxTestType, {
+                    type: 'bar',
+                    data: {
+                        labels: testTypeData.labels,
+                        datasets: [{
+                            label: 'Number of Scenarios',
+                            data: testTypeData.counts,
+                            backgroundColor: [
+                                'rgba(75, 192, 192, 0.7)',
+                                'rgba(255, 99, 132, 0.7)',
+                                'rgba(255, 205, 86, 0.7)',
+                                'rgba(54, 162, 235, 0.7)',
+                                'rgba(153, 102, 255, 0.7)'
+                            ],
+                            borderColor: [
+                                'rgba(75, 192, 192, 1)',
+                                'rgba(255, 99, 132, 1)',
+                                'rgba(255, 205, 86, 1)',
+                                'rgba(54, 162, 235, 1)',
+                                'rgba(153, 102, 255, 1)'
+                            ],
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Count'
+                                },
+                                ticks: {
+                                    precision: 0
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            title: {
+                                display: true,
+                                text: 'Test Categories'
+                            }
+                        }
+                    }
+                });
+            }
+
+            const avgPerfData = JSON.parse('{{ chart_data_perf_avg_json | safe }}');
+            const ctxBar = document.getElementById('avgResponseTimeChart').getContext('2d');
+            
+            if (ctxBar && (avgPerfData.avg_ods_time > 0 || avgPerfData.avg_prd_time > 0)) {
+                new Chart(ctxBar, {
+                    type: 'bar',
+                    data: {
+                        labels: ['ODS Avg', 'PRD Avg'],
+                        datasets: [{
+                            label: 'Time in Milliseconds',
+                            data: [avgPerfData.avg_ods_time, avgPerfData.avg_prd_time],
+                            backgroundColor: [
+                                'rgba(54, 162, 235, 0.7)', 
+                                'rgba(255, 99, 132, 0.7)'
+                            ],
+                            borderColor: [
+                                'rgba(54, 162, 235, 1)',
+                                'rgba(255, 99, 132, 1)'
+                            ],
+                            borderWidth: 1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Time in Milliseconds (ms)'
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        let label = context.dataset.label || '';
+                                        if (label) {
+                                            label += ': ';
+                                        }
+                                        if (context.parsed.y !== null) {
+                                            label += context.parsed.y + ' ms';
+                                        }
+                                        return label;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+
+            {% if metadata.ENABLE_PERF_GRAPH == 'YES' %}
+            
+            const detailedPerfData = JSON.parse('{{ chart_data_time_per_test_json | safe }}');
+            const ctxDetailed = document.getElementById('detailedResponseTimeChart').getContext('2d');
+            
+            if (ctxDetailed && detailedPerfData.labels.length > 0) {
+                new Chart(ctxDetailed, {
+                    type: 'bar',
+                    data: {
+                        labels: detailedPerfData.labels.map(label => label.substring(label.indexOf(':') + 2)),
+                        datasets: [
+                            {
+                                label: 'ODS Response Time (ms)',
+                                data: detailedPerfData.ods_times,
+                                backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                            },
+                            {
+                                label: 'PRD Response Time (ms)',
+                                data: detailedPerfData.prd_times,
+                                backgroundColor: 'rgba(255, 99, 132, 0.7)',
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Test Case'
+                                },
+                                ticks: {
+                                    autoSkip: false,
+                                    maxRotation: 45,
+                                    minRotation: 45
+                                }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                title: {
+                                    display: true,
+                                    text: 'Response Time (ms)'
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            {% endif %}
+            
+            // --- BUTTON TOGGLE FOR JSON ---
+            const toggleButtons = document.querySelectorAll('.toggle-responses-btn');
+            toggleButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    const targetId = button.getAttribute('data-target');
+                    const targetRow = document.getElementById(targetId);
+                    
+                    if (targetRow.style.display === 'table-row') {
+                        targetRow.style.display = 'none';
+                        button.textContent = 'JSON';
+                    } else {
+                        targetRow.style.display = 'table-row';
+                        button.textContent = 'Hide';
+                    }
+                });
+            });
+
+            // --- FILTER LOGIC ---
+            window.filterTable = function() {
+                const input = document.getElementById('searchInput');
+                const filter = input.value.toUpperCase();
+                const table = document.getElementById("comparisonTable");
+                const tr = table.getElementsByClassName('main-row');
+
+                for (let i = 0; i < tr.length; i++) {
+                    const tdTestName = tr[i].getElementsByTagName("td")[0];
+                    const tdSummary = tr[i].getElementsByTagName("td")[10]; // Adjusted index due to new cols
+                    
+                    if (tdTestName || tdSummary) {
+                        const testNameText = tdTestName.textContent || tdTestName.innerText;
+                        const summaryText = tdSummary.textContent || tdSummary.innerText;
+
+                        if (testNameText.toUpperCase().indexOf(filter) > -1 || summaryText.toUpperCase().indexOf(filter) > -1) {
+                            tr[i].style.display = "";
+                        } else {
+                            tr[i].style.display = "none";
+                            const responseRow = document.getElementById(`response-row-${tr[i].getAttribute('data-row-index')}`);
+                            responseRow.style.display = "none";
+                        }
+                    }       
+                }
+            }
+        });
+        
+        // --- CUSTOM SORT LOGIC (Pairs Rows) ---
+        var currentSort = { column: -1, direction: 'asc' };
+
+        function sortTable(columnIndex) {
+            const table = document.getElementById("comparisonTable");
+            const tbody = table.querySelector("tbody");
+            const rows = Array.from(tbody.rows);
+            
+            // Group main-row and response-row pairs
+            let rowGroups = [];
+            for (let i = 0; i < rows.length; i += 2) {
+                rowGroups.push({
+                    main: rows[i],
+                    response: rows[i+1]
+                });
+            }
+
+            // Determine direction
+            let direction = 'asc';
+            if (currentSort.column === columnIndex && currentSort.direction === 'asc') {
+                direction = 'desc';
+            }
+            currentSort = { column: columnIndex, direction: direction };
+
+            // Sort Function
+            rowGroups.sort((a, b) => {
+                let cellA = a.main.cells[columnIndex].innerText.trim();
+                let cellB = b.main.cells[columnIndex].innerText.trim();
+
+                // Numeric sort for columns 4 & 5 (Time) & 6 & 7 (Records)
+                if (columnIndex === 4 || columnIndex === 5 || columnIndex === 6 || columnIndex === 7) {
+                     const numA = parseFloat(cellA.replace(/[^0-9.]/g, '')) || 0;
+                     const numB = parseFloat(cellB.replace(/[^0-9.]/g, '')) || 0;
+                     return direction === 'asc' ? numA - numB : numB - numA;
+                }
+
+                // Default String Sort
+                if (direction === 'asc') {
+                    return cellA.localeCompare(cellB);
+                } else {
+                    return cellB.localeCompare(cellA);
+                }
+            });
+
+            // Re-append sorted rows
+            const fragment = document.createDocumentFragment();
+            rowGroups.forEach(group => {
+                fragment.appendChild(group.main);
+                fragment.appendChild(group.response);
+            });
+            tbody.appendChild(fragment);
+
+            // Update Header Arrow Indicators
+            const headers = document.querySelectorAll("#comparisonTable th");
+            headers.forEach((th, i) => {
+                let text = th.innerText.replace(" ▲", "").replace(" ▼", "");
+                th.innerText = text;
+                if (i === columnIndex) {
+                    th.innerText += (direction === 'asc' ? " ▲" : " ▼");
+                }
+            });
+        }
+    </script>
+
+</body>
+</html>
