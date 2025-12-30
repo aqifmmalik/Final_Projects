@@ -1,0 +1,23 @@
+Need Json file from postman
+
+Data Sheet
+
+
+
+test_name	Execution_Type	run_id	vpin	offset	limit	Test_Type
+Member - Valid search with an existing Member - 10221485	Static	TC1				Functional
+ 
+
+
+Settings Sheet
+Key	Value
+COLLECTION_FILE	MemberAPI_Final.json
+ODS_URL	URl
+PRD_URL	URl
+OUTPUT_DIR	\\QA\Testing_Results\API\Member\
+TEMPLATE_FILE	report_template.html
+DYNAMIC_FIELD_TERMS	LAST_UPDATE
+DEBUG_MODE	no
+AUTO_OPEN_HTML	Yes
+ENABLE_PERF_GRAPH	Yes
+RUN_MODE	DUAL
